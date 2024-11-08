@@ -1,9 +1,9 @@
 use serde_json::{Result, Value, Error};
 use std::io;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use serde::{Serialize, Deserialize};
 use serde::de::{self, Deserializer, MapAccess, Visitor};
-
+use serde::{Serializer, ser::SerializeStruct};
 
 
 // Message Handler Class
@@ -17,7 +17,7 @@ fn message_deserializer(input_string: String) -> Result<Message> {
 }
 
 // Serializer
-fn message_serializer(output_string: &String) -> Result<String> {
+fn message_serializer(output_string: &Message) -> Result<String> {
   return serde_json::to_string(output_string);
 }
 
@@ -51,6 +51,20 @@ struct Request {
   body: MessageType,
 }
 
+// Impl generate message response on Request to avoid having to instantiate Request type and then generating response using request
+impl Request {
+  fn generate_response(self, node_message_queue_ref: usize) {
+
+    match self.body { 
+      MessageType::Echo => { 
+        return Response { src: self.dest, dest: self.src
+          , body: EchoOk { typ: "echo_ok".to_string(), msg_id: node_message_queue_ref + 1, in_reply_to: self.body.msg_id, echo: self.body.echo} }
+       },
+      _ => panic!("No Response type exists for this Request")
+    }
+  }
+}
+
 // Message SubType: Response
 #[derive(Deserialize, Debug, Serialize)]
 struct Response {
@@ -59,9 +73,7 @@ struct Response {
   body: MessageType,
 }
 
-impl Response {
-  !todo("Add impl that creates a Response from a Request message");
-}
+
 
 // MessageType Class
 // MessageType is the content of the Message
@@ -73,6 +85,7 @@ enum MessageType {
   // Broadcast,
   // Heartbeat,
 }
+
 
 #[derive(Deserialize, Debug, Serialize)]
 struct Echo {
@@ -237,66 +250,74 @@ struct Node {
 
 impl Node {
   // Create new instance of Node if not already in existance; existance determined by entry in nodes collection as multiple nodes may be created
-  fn new(message: Message, cluster: Cluster) -> self {
-    // Init enum used to determine whether incoming message is Init or RequestResponse
-    if message == Init {
-      let node_exists = Cluster.nodes.contains_key(message.node_id);
+  fn new(message: Message, cluster: Cluster) -> Self {
+    // Init enum used to determine whether incoming message is Init or Request
+    if message == Message::Init {
+      let node_exists = cluster.nodes.contains_key(message.node_id);
 
       match node_exists {
         false => {
-          let new_node = self { node_id: message.node_id, node_ids: message.node_ids, message_requests: VecDeque::new(), message_responses: VecDeque::new(), message_record: HashMap::new() };
-          let node_add: Result<(), ClusterExceptions> = Cluster.add(new_node.node_id);
+          let new_node = Self { node_id: message.node_id, node_ids: message.node_ids, message_requests: VecDeque::new(), message_responses: VecDeque::new(), message_record: HashMap::new() };
+          let node_add: Result<(), ClusterExceptions> = cluster.add(new_node.node_id);
 
           match node_add {
             // Existing node prints and return Self
             Ok(()) => {
-              println!("Node {} has been connected to {}", node_exists, Cluster.cluster_id);
-              self
+              println!("Node {} has been connected to {}", node_exists, cluster.cluster_id);
+              Self
             },
             Err(node_add) => {
               // New node  prints and appends Self to nodes collection
-              println!("{} exception on connecting {} to {}", node_exists, new_node.node_id, Cluster.cluster_id); 
-              self 
+              println!("{} exception on connecting {} to {}", node_exists, new_node.node_id, cluster.cluster_id); 
+              Self 
             }
           }
         },
         true => {
-          println!("Node {} already exists and connected to {}", message.node_id, Cluster.cluster_id);
+          println!("Node {} already exists and connected to {}", message.node_id, cluster.cluster_id);
 
-          let retrieve_node = Cluster.nodes.get_key_value(message.node_id);
+          let retrieve_node = cluster.nodes.get_key_value(message.node_id);
 
           match retrieve_node {
             Some(retrieve_node) => {
               retrieve_node.clone().1
             },
-            None => panic!("Node {} exists but failed to retrieve object from cluster")
+            None => panic!("Node {} exists but failed to retrieve object from cluster", message.node_id)
           }
         }
       }
     }
   }
   // Update existing Node with new message
-  fn or_update(self, message: Message) -> self {
-    // Only update if Node exists and message is RequestResponse
-    if message == RequestResponse {
+  fn or_update(self, message: Message) -> Self {
+    // Only update if Node exists and message is Request
+    if message == Message::Request {
 
-      let node_exists: Option<String> = nodes.get(message.node_id);
+      let node_exists: Option<String> = self.nodes.get(message.node_id);
 
       match node_exists {
         // When Node does exist, update and return self
         Some(node_exists) => {
           println!("Node {} already exists", node_exists.unwrap()); 
-          let mut node = self;
-          let node_message_reference = nodes.get(node).unwrap().message_register.len() + 1;
+          let mut node = Self;
+          let node_message_reference = self.nodes.get(node).unwrap().message_register.len() + 1;
 
-          nodes.entry(node)
-          .and_modify(node.message_register.insert(node_message_reference, message))
+          self.message_requests.push_back(message);
+
+          self.nodes.entry(node)
+          .and_modify(node.message_record.insert(node_message_reference, message))
         },
         None => {
           panic!("Node {} does not exist so message request cannot be executed", node_exists.unwrap());
         }
       }
     }
+  }
+
+  // Formulate responses to messages in request queue
+
+  fn prepare_request_response(self) {
+
   }
 
 }
@@ -306,7 +327,7 @@ impl Node {
 struct Cluster {
   cluster_id: String,
   nodes: BTreeMap<usize, Node>,
-  node_message_log: Hashmap<usize, Message>
+  node_message_log: HashMap<usize, Message>
 }
 
 enum ClusterExceptions {
@@ -317,45 +338,46 @@ enum ClusterExceptions {
 
 impl Cluster {
 
-  fn create(cluster_reference: usize) -> self {
+  fn create(cluster_reference: usize) -> Self {
     // TODO: check whether cluster with reference already exists
-    self { cluster_id: format!("cluster-{cluster_reference}"), nodes: BTreeMap::new(), node_message_log: HashMap::new() }
+    Self { cluster_id: format!("cluster-{cluster_reference}"), nodes: BTreeMap::new(), node_message_log: HashMap::new() }
   }
 
   fn add(self, node: Node) -> Result<(), ClusterExceptions> {
-    let node_entry = self.get(Node.node_id);
+    let node_entry = self.get(node.node_id);
+    let nodes_id_ref = *self.nodes.keys().max().unwrap();
 
     match node_entry {
-      Some(node_entry) => {println!("Node {} already connected to {}", Node.node_id, self.cluster_id); ClusterExceptions::NodeAlreadyAttachedToCluster},
+      Some(node_entry) => {println!("Node {} already connected to {}", node.node_id, self.cluster_id); ClusterExceptions::NodeAlreadyAttachedToCluster},
       None => {
-        self.insert(Node.node_id, Node); 
-        println!("{} has been connected to {}", Node.node_id, self.cluster_id); 
+        self.insert(nodes_id_ref, node); 
+        println!("{} has been connected to {}", node.node_id, self.cluster_id); 
         Ok(())
       }
     }
   }
 
   fn remove(self, node: Node) -> Result<(), ClusterExceptions>{
-    let node_entry = self.get(Node.node_id,);
+    let node_entry = self.get(node.node_id,);
 
     match node_entry {
       Some(node_entry) => {
-        let node_removal = self.remove(Node.node_id);
+        let node_removal = self.remove(node.node_id);
 
         match node_removal {
           Some(node_removal) => {
-            println!("{} has been disconnected from {}", Node.node_id, self.cluster_id); 
+            println!("{} has been disconnected from {}", node.node_id, self.cluster_id); 
             Ok(())
           },
           None => {
-            println!("Failed to disconnect {} from {}", Node.node_id, self.cluster_id); 
+            println!("Failed to disconnect {} from {}", node.node_id, self.cluster_id); 
             ClusterExceptions::FailedToRemoveNodeFromCluster
           }
         }
         
       },
       None => {
-        println!("Node {} not connected to {}", Node.node_id, self.cluster_id); 
+        println!("Node {} not connected to {}", node.node_id, self.cluster_id); 
         ClusterExceptions::NodeNotAttachedToCluster
       }
     }
@@ -381,16 +403,43 @@ impl Cluster {
     self.keys()
   }
 
-  fn count_nodes() {
+  fn count_nodes(self) {
     self.len()
   }
 
-  fn execute_communication() {
+  fn execute_communication(self, message_execution_type: MessageExecutionType) -> Result<MessageExecutionTypeErrors> {
     // For each node in cluster
+    let mut stdout = io::stdout().lock();
 
     for (node_id, node) in self.nodes {
+      let mut node_message_queue_ref = 0_usize;
 
+      for message in node.message_requests.pop_front() {
+        match message {
+          Some(message) => {
+            let response = message.generate_response(node_message_queue_ref);
+
+            node.message_record.append(response.clone());
+
+            let response_string = message_serializer(&response);
+
+            match message_execution_type {
+              MessageExecutionType::StdOut => {
+                message_execution_type.write_to_std_out(stdout, response_string)?;
+              },
+              MessageExecutionType::TCP => {
+                println!("TCP has not been implemented yet")
+              },
+              _ => println!("Error on xommunication execution")
+            }
+
+            node_message_queue_ref += 1;
+          },
+          None => ()
+        }
+      }
     }
+
     // Iterate through message_requests
 
     // Append each request to Cluster log
@@ -411,25 +460,14 @@ enum MessageExecutionType {
 struct StdOut {}
 
 impl StdOut {
-  fn write_to_std_out(message: String) -> Result<()> {
-    let mut stdout = io::stdout().lock();
-
+  fn write_to_std_out(stdout: StdOutLock<'static>, message: String) -> Result<()> {
     stdout.write_all(format!("b{message}"))?;
-
     Ok(())
   }
 }
 
 enum MessageExecutionTypeErrors {
   FailedToExecuteMessageResponse
-}
-
-impl MessageExecutionType {
-  fn execute_response(self) -> Result<MessageExecutionTypeErrors> {
-    match self {
-      StdOut,
-    }
-  }
 }
 
 // Session Class
@@ -448,7 +486,9 @@ struct Session {
 // should be implemented once received or as part of DAG
 impl Session {
   // Add create method to tie session to cluster
-  todo!("create method")
+  fn new(cluster: Cluster) -> Session {
+    return Self {session_id: "999".to_string(), cluster: cluster}
+  }
   // Session execution used to handle incoming client request and execute, either lazily or eagerly
   // Might need to add Cluster object to session_context as cluster is the container for the session that all nodes are connected to and all messages will emanate to/from
   fn session_execution(implementation_model: Implementation, cluster_id: Cluster, client_request: String) -> () {
@@ -458,7 +498,16 @@ impl Session {
       match client_request {
         Ok(request) => {
 
-          // Depending on the execution model, execution eagerly or lazily
+          // Depending on the execution model, execute eagerly or lazily
+          match implementation {
+            Implementation::EAGER => {
+              cluster_id.execute_communication(cluster, client_request);
+            },
+            Implementation::LAZY => {
+              println!("DAG data type is required to record requests and then resolve on something like collect/show/write")
+            },
+            _ => panic!("Implementation model not selected or not supported")
+          }
 
         },
         // Error out of client request that has no execution context (i.e. does not match internally supported actions)
@@ -472,16 +521,36 @@ impl Session {
 
 // These implementations need to be back by a implementation model that reflects the type
 enum Implementation {
-  EAGER,
+  EAGER {client_requests: Vec<String>},
   LAZY
+}
+
+struct EAGER {
+  client_requests: Vec<String>
+}
+
+impl EAGER {
+  fn append_client_request(message: String) {
+    self.client_requsts.append(message.clone())
+  }
+}
+
+struct LAZY {
+  // Incoming requests from client
+  client_requests: Vec<String>,
+  // Incoming requests will be parsed for keywords and logical actions, i.e. groupby().collect()
+  keywords: Vec<String>,
+  // An execution plan must be developed based on keywords and logical actions and must be distributed across nodes in cluster
+  // Each individual nodes part of the execution plan will then be sent to it for processing
 }
 
 fn main() {
 
-  let implementation: String = Implementation::EAGER;
+  let implementation: String = Implementation::EAGER {client_requests: Vec::new() };
   let cluster: Cluster = Cluster::create(1);
   let session = Session::session_context(implementation_model, cluster);
   
+  // This loops accepts client requests
   loop {
     let mut std_input = String::new();
 
@@ -495,18 +564,10 @@ fn main() {
 
         // Otherwise, deserialize message into one of expected types and continue loop
         else {        
-          match implementation {
-            Implementation::EAGER => {
-              session_execution(cluster, line);
-            },
-            Implementation::LAZY => {
-            todo!("DAG data type is required to record requests and then resolve on something like collect/show/write")
-            },
-            _ => panic!("Implementation model not selected or not supported")
-          }
+          
         }
       },
-      Err(error) => println!("Error reading from STDIN {error}"),
+      Err(error) => eprintln!("Error reading from STDIN {error}"),
     }
   }
 
