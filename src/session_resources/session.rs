@@ -36,7 +36,7 @@ impl Session {
             self.cluster.execute_communication(&self.message_output_target);
           },
           Err(error) => {
-            eprintln!("Allocation of message in cluster failed with this error: {error}");
+            eprintln!("Error: {error}");
           }
         }
         

@@ -1,5 +1,6 @@
 use serde::{Serialize, Deserialize};
 use serde_json::Result;
+use std::fmt;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(untagged, rename_all = "lowercase")]
@@ -104,6 +105,14 @@ impl Message {
   }
 }
 
+impl fmt::Display for MessageType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            MessageType::Echo { .. }=> write!(f, "Echo"),
+            MessageType::EchoOk { .. } => write!(f, "EchoOk"),
+        }
+    }
+}
 
 // Trait to access fields in `Message`
 pub trait MessageFields {

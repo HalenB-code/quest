@@ -33,6 +33,7 @@ pub struct TCP {}
   
 impl StdOut {
 pub fn write_to_std_out(mut stdout: StdoutLock<'static>, message: String) -> Result<(), std::io::Error> {
+    let message = format!("{message}\n");
     let bytes = message.as_bytes();
     stdout.write_all(bytes)?;
     stdout.flush();
