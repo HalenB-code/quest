@@ -41,6 +41,14 @@ pub enum MessageType {
         in_reply_to: usize,
         echo: String,
     },
+    Generate {
+    },
+    #[serde(rename = "generate_ok")]
+    GenerateOk {
+        msg_id: usize,
+        in_reply_to: usize,
+        id: String
+    },
 }
 
 // Module to handle serialization and deserialization as a JSON string.
@@ -80,36 +88,14 @@ pub fn message_serializer(output_message: &Message) -> Result<String> {
     serde_json::to_string(output_message)
 }
 
-// Impl generate message response on Message
-impl Message {
-    pub fn generate_response(&self, node_message_queue_ref: usize) -> Message {
-
-    let request_body = self.body();
-
-    match request_body {
-        Some(message_type) => {
-
-            match message_type {
-                MessageType::Echo { .. } => {
-                    Message::Response { src: (*self.dest().unwrap().clone()).to_string(), dest: (*self.src().unwrap().clone()).to_string()
-                        , body: MessageType::EchoOk { msg_id: node_message_queue_ref + 1, in_reply_to: self.body().unwrap().msg_id(), echo: (*self.body().unwrap().echo().unwrap().clone()).to_string() } }
-                },
-                _ => {
-                    panic!("No Response type exists for this Request!")
-                }
-            }
-            
-        }
-        _ => panic!("Request type does not exist!")
-    }
-  }
-}
 
 impl fmt::Display for MessageType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             MessageType::Echo { .. }=> write!(f, "Echo"),
             MessageType::EchoOk { .. } => write!(f, "EchoOk"),
+            MessageType::Generate { .. } => write!(f, "Generate"),
+            MessageType::GenerateOk { .. } => write!(f, "GenerateOk"),
         }
     }
 }
@@ -127,7 +113,7 @@ pub trait MessageFields {
 
 // Trait to access fields in `MessageType`
 pub trait MessageTypeFields {
-    fn msg_id(&self) -> usize;
+    fn msg_id(&self) -> Option<usize>;
     fn echo(&self) -> Option<&String>;
     fn in_reply_to(&self) -> Option<usize>;
 }
@@ -190,9 +176,11 @@ impl MessageFields for Message {
 
 // Implement `MessageTypeFields` for `MessageType`
 impl MessageTypeFields for MessageType {
-    fn msg_id(&self) -> usize {
+    fn msg_id(&self) -> Option<usize> {
         match self {
-            MessageType::Echo { msg_id, .. } | MessageType::EchoOk { msg_id, .. } => *msg_id,
+            MessageType::Echo { msg_id, .. } | MessageType::EchoOk { msg_id, .. } => Some(*msg_id),
+            MessageType::GenerateOk { msg_id, .. } => Some(*msg_id),
+            _ => None,
         }
     }
 

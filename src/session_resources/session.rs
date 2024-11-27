@@ -1,5 +1,9 @@
-use super::cluster::{self, Cluster};
-use super::implementation::{MessageExecutionType, Implementation};
+use crate::session_resources::cluster::{self, Cluster};
+use crate::session_resources::implementation::{MessageExecutionType, Implementation};
+use tokio::sync::{mpsc, Mutex};
+use tokio::sync::mpsc::Receiver;
+use std::sync::Arc;
+use crate::session_resources::message::Message;
 
 // Session Class
 // The session is created to manage the overall execution of client requests
@@ -7,7 +11,7 @@ use super::implementation::{MessageExecutionType, Implementation};
 // The execution model -- eager or lazy -- is determined in the configs and dictates how incoming requests are executed
 // Incoming requests are captured through STDIN and passed to the session, which will use the execution type constant to implement the execution model
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Session {
   pub session_id: String,
   pub cluster: Cluster,
@@ -25,24 +29,36 @@ impl Session {
   }
   // Session execution used to handle incoming client request and execute, either lazily or eagerly
   // Might need to add Cluster object to session_context as cluster is the container for the session that all nodes are connected to and all messages will emanate to/from
-  pub fn session_execution(&mut self, client_request: String) {
-
+  pub async fn session_execution(&mut self) {
+    
     match self.implementation_type {
+
       Implementation::EAGER => {
-        let message_allocation = self.cluster.add_or_update_node(client_request);
+        
+        let message_allocation = self.cluster.run(self.message_output_target.clone()).await;
 
         match message_allocation {
           Ok(()) => {
-            self.cluster.execute_communication(&self.message_output_target);
+            {}
           },
           Err(error) => {
-            eprintln!("Error: {error}");
+            eprintln!("Cluster error: {error}");
           }
         }
-        
+
       },
       Implementation::LAZY => {
-        println!("DAG data type is required to record requests and then resolve on something like collect/show/write")
+        // let message_allocation = self.cluster.add_or_update_node(client_request);
+
+        // match message_allocation {
+        //   Ok(()) => {
+        //     self.cluster.execute_communication(&self.message_output_target);
+        //   },
+        //   Err(error) => {
+        //     eprintln!("Error: {error}");
+        //   }
+        // }
+        println!("DAG data type is required to record requests and then resolve on something like collect/show/write");
       },
       _ => panic!("Implementation model not selected or not supported")
     }

@@ -3,13 +3,22 @@ use std::io;
 use crate::session_resources::implementation::{MessageExecutionType, Implementation};
 use crate::session_resources::cluster::Cluster;
 use crate::session_resources::session::Session;
+use tokio::sync::mpsc;
 
-fn main() {
+#[tokio::main]
+async fn main() {
 
   let implementation: Implementation = Implementation::EAGER;
   let message_execution_target = MessageExecutionType::StdOut;
-  let cluster: Cluster = Cluster::create(1);
+  let (tx, mut rx) = mpsc::channel::<String>(100);
+
+  let cluster: Cluster = Cluster::create(1, rx);
+ 
   let mut session = Session::new(cluster, implementation, message_execution_target);
+  
+  tokio::spawn(async move {
+    session.session_execution().await;
+  });
   
   // This loops accepts client requests
   loop {
@@ -25,7 +34,7 @@ fn main() {
 
         // Otherwise, deserialize message into one of expected types and continue loop
         else {        
-          session.session_execution( std_input);
+          tx.send(std_input).await;
         }
       },
       Err(error) => eprintln!("Error reading from STDIN {error}"),
