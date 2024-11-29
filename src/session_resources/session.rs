@@ -1,9 +1,5 @@
-use crate::session_resources::cluster::{self, Cluster};
+use crate::session_resources::cluster::Cluster;
 use crate::session_resources::implementation::{MessageExecutionType, Implementation};
-use tokio::sync::{mpsc, Mutex};
-use tokio::sync::mpsc::Receiver;
-use std::sync::Arc;
-use crate::session_resources::message::Message;
 
 // Session Class
 // The session is created to manage the overall execution of client requests
@@ -60,7 +56,6 @@ impl Session {
         // }
         println!("DAG data type is required to record requests and then resolve on something like collect/show/write");
       },
-      _ => panic!("Implementation model not selected or not supported")
     }
   }
 }

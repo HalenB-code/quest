@@ -1,11 +1,11 @@
-use std::io;
-use std::error::Error;
-use crate::session_resources::message::{self, Message};
+use crate::session_resources::message::Message;
 use std::collections::{HashMap, BTreeMap};
 use crate::session_resources::node::Node;
-use crate::session_resources::implementation::{MessageExecutionType, Implementation, StdOut, TCP};
+use crate::session_resources::implementation::MessageExecutionType;
 use crate::session_resources::message::MessageFields;
+use crate::session_resources::messenger::Messenger;
 use crate::session_resources::exceptions::ClusterExceptions;
+use crate::session_resources::warnings::ClusterWarnings;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 
@@ -15,80 +15,133 @@ use tokio::sync::{mpsc, Mutex};
 pub struct Cluster {
     pub cluster_id: String,
     pub receiving_channel: Arc<Mutex<mpsc::Receiver<String>>>,
-    pub nodes: BTreeMap<String, Arc<Node>>,
+    pub messenger: Messenger,
+    pub nodes: BTreeMap<String, Node>,
     pub node_message_log: HashMap<usize, (Message, String)>,
   }
   
   impl Cluster {
   
-    pub fn create(cluster_reference: usize, incoming_message_handler: mpsc::Receiver<String>) -> Self {
-      // TODO: check whether cluster with reference already exists
-      Self { cluster_id: format!("cluster-{cluster_reference}"), receiving_channel: Arc::new(Mutex::new(incoming_message_handler)), nodes: BTreeMap::new(), node_message_log: HashMap::new() }
+    pub fn create(
+      cluster_reference: usize, 
+      incoming_message_handler: mpsc::Receiver<String>
+    ) -> Self {
+
+      Self { 
+        cluster_id: format!("cluster-{cluster_reference}"), 
+        receiving_channel: Arc::new(Mutex::new(incoming_message_handler)), 
+        messenger: Messenger::create(), 
+        nodes: BTreeMap::new(), 
+        node_message_log: HashMap::new() 
+      }
     }
 
-    pub async fn add_node_to_cluster(&mut self, incoming_message: Message, output_target: MessageExecutionType) -> Result<(), ClusterExceptions> {
+    pub async fn node_initialization(
+      &mut self,
+      output_target: MessageExecutionType
+    ) -> Result<(), ClusterExceptions> {
 
-        let node_exists = self.nodes.contains_key(incoming_message.node_id().unwrap());
-    
+      let message_request: Message;
+
+      if let Some(message) = self.messenger.dequeue().await {
+        message_request = message;
+
+        let node_exists = self.nodes.contains_key(message_request.node_id().unwrap());
+  
         match node_exists {
             false => {
-                let new_node = Node::create(&incoming_message).await;
+                let mut node = Node::create(&message_request).await;
+                let node_id = node.node_id.clone();
                 let nodes_id_ref = *self.node_message_log.keys().max().unwrap_or(&0_usize) + 1;
-
-                self.nodes.entry(new_node.node_id.clone()).or_insert(new_node.clone());
-                self.node_message_log.insert(nodes_id_ref, (incoming_message.clone(), "ok".to_string()));
     
-                let node_check = self.nodes.contains_key(incoming_message.node_id().unwrap());
-                let node_id = new_node.node_id.clone();
-
-                match node_check {
-                  // Existing node prints and return Self
-                  true => {
-                    println!("Node {} has been connected to {}", node_id, self.cluster_id);
-                      tokio::spawn(async move {
-                        new_node.process_requests(output_target).await;
-                      });
-                  },
-                  false => {
-                      // New node  prints and appends Self to nodes collection
-                      return Err(ClusterExceptions::FailedToRetrieveNodeFromCluster { error_message: node_id } );
-                  }
+                // Store the new node in the cluster
+                self.nodes
+                    .entry(node_id.clone())
+                    .or_insert(node.clone());
+  
+                self.node_message_log
+                    .insert(nodes_id_ref, (message_request.clone(), "ok".to_string()));
+    
+                let node_check = self.nodes.contains_key(message_request.node_id().unwrap());
+                
+                if node_check {
+                    println!("Node {} has been connected to {}", &node_id, self.cluster_id);
+    
+                    let cluster_arc = Arc::new(Mutex::new(self.clone()));
+    
+                    tokio::spawn(async move {
+                      let cluster_clone = Arc::clone(&cluster_arc);
+                        if let Err(err) = node
+                            .process_requests(output_target, &cluster_clone)
+                            .await
+                        {
+                            eprintln!(
+                                "Error processing requests for node {}: {:?}",
+                                node_id, err
+                            );
+                        }
+                    });
+                } else {
+                    return Err(ClusterExceptions::FailedToRetrieveNodeFromCluster {
+                        error_message: node_id,
+                    });
                 }
-
-            },
+            }
             true => {
-                let retrieve_node = self.nodes.get_key_value(incoming_message.node_id().unwrap());
-    
-                match retrieve_node {
-                    Some(retrieve_node) => {
-                        println!("Node {} already exists and connected to {}", incoming_message.node_id().unwrap(), self.cluster_id);
-                    },
-                    None => {
-                        return Err(ClusterExceptions::FailedToRetrieveNodeFromCluster { error_message: incoming_message.node_id().unwrap().to_string() } );
-                    }
-                    
+                if let Some((_key, _value)) = self.nodes.get_key_value(message_request.node_id().unwrap()) {
+                    println!(
+                        "Node {} already exists and is connected to {}",
+                        message_request.node_id().unwrap(),
+                        self.cluster_id
+                    );
+                } else {
+                    return Err(ClusterExceptions::FailedToRetrieveNodeFromCluster {
+                        error_message: message_request.node_id().unwrap().to_string(),
+                    });
                 }
             }
         }
-        Ok(())
-    }
 
-    pub async fn update_node(&mut self, incoming_message: Message) -> Result<(), ClusterExceptions> {
-      let node = self.nodes.get_mut(incoming_message.dest().unwrap());
-      match node {
-          Some(node) => {
-              let mut message_requests = node.message_requests.lock().await;
-              message_requests.push_back(incoming_message);
-              // Release the lock immediately after updating
-          },
-          None => {
-              return Err(ClusterExceptions::NodeDoesNotExist {
-                  error_message: incoming_message.dest().unwrap().to_string(),
-              });
-          }
+      } else {
+        ClusterWarnings::NoNewRequestsToProcess { warning_message: self.cluster_id.clone() };
       }
+
       Ok(())
   }
+  
+  pub async fn update_node(&mut self, incoming_message: Message) -> Result<(), ClusterExceptions> {
+    // Retrieve the node by its ID
+    if let Some(node_arc) = self.nodes.get(incoming_message.dest().unwrap()) {
+        // Lock the node and update its message queue
+        println!("Before node mutex update_node");
+        let node = node_arc;
+        println!("Awaiting node mutex update_node");
+        let mut message_requests = node.message_requests.lock().await;
+        message_requests.push_back(incoming_message);
+        // Lock is automatically released when it goes out of scope
+    } else {
+        // Handle case where node does not exist
+        return Err(ClusterExceptions::NodeDoesNotExist {
+            error_message: incoming_message.dest().unwrap().to_string(),
+        });
+    }
+    Ok(())
+}
+
+pub async fn propagate_message(&mut self, message: Message) -> Result<(), ClusterExceptions> {
+
+  // Retrieve the destination node from the cluster
+  if let Ok(requeued_message) = self.messenger.requeue(message.clone()).await {
+      ()
+  } else {
+      // If the node does not exist, return an error
+      return Err(ClusterExceptions::NodeDoesNotExist {
+          error_message: format!("{:?}", message),
+      });
+  }
+
+  Ok(())
+}
 
   pub async fn run(&mut self, message_execution_type: MessageExecutionType) -> Result<(), ClusterExceptions> {
     
@@ -100,21 +153,25 @@ pub struct Cluster {
     
     while let Some(incoming_message) = rx.recv().await {
 
-        let client_request = message::message_deserializer(&incoming_message)?;
+        let message_request = self.messenger.queue(incoming_message).await;
 
-        println!("{:?}", &client_request);
+        println!("{:?}", &message_request);
 
-        match client_request {
-            Message::Init { .. } => {
-                self.add_node_to_cluster(client_request, message_execution_type.clone()).await?;
-            }
-            Message::Request { .. } => {
-                self.update_node(client_request).await?;
-            }
-            _ => {
-                return Err(ClusterExceptions::UnkownClientRequest {
-                    error_message: client_request.body().unwrap().to_string(),
-                });
+        match message_request {
+            Ok( Message::Init { .. } ) => {
+                self.node_initialization(message_execution_type.clone()).await?;
+            },
+            Ok( Message::Request { .. } ) => {
+                // self.update_node(client_request).await?;
+                continue
+            },
+            Ok( Message::Response { .. } ) => {
+              return Err(ClusterExceptions::UnkownClientRequest {
+                error_message: message_request?.dest().unwrap().to_string(),
+            });
+            },         
+            Err(error) => {
+                return Err(error);
             }
         }
     }
@@ -126,7 +183,7 @@ pub struct Cluster {
       let node_removal = self.nodes.remove(&node.node_id);
   
       match node_removal {
-        Some(node_removal) => {
+        Some(_node_removal) => {
           println!("{} has been disconnected from {}", node.node_id, self.cluster_id);
         },
         None => {

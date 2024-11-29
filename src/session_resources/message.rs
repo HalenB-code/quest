@@ -1,6 +1,7 @@
 use serde::{Serialize, Deserialize};
 use serde_json::Result;
 use std::fmt;
+use std::collections::HashMap;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(untagged, rename_all = "lowercase")]
@@ -49,6 +50,29 @@ pub enum MessageType {
         in_reply_to: usize,
         id: String
     },
+    Broadcast {
+        message: usize
+    },
+    #[serde(rename = "broadcast_ok")]
+    BroadcastOk {
+        msg_id: usize,
+        in_reply_to: usize,
+    },
+    // This will clash with other read requests for later challenges
+    #[serde(rename = "read")]
+    BroadcastRead {
+    },
+    #[serde(rename = "read_ok")]
+    BroadcastReadOk {
+        messages: Vec<usize>
+    },
+    Topology {
+        topology: HashMap<String, Vec<String>>
+    },
+    #[serde(rename = "topology_ok")]
+    TopologyOk {
+
+    }
 }
 
 // Module to handle serialization and deserialization as a JSON string.
@@ -96,6 +120,12 @@ impl fmt::Display for MessageType {
             MessageType::EchoOk { .. } => write!(f, "EchoOk"),
             MessageType::Generate { .. } => write!(f, "Generate"),
             MessageType::GenerateOk { .. } => write!(f, "GenerateOk"),
+            MessageType::Broadcast { .. } => write!(f, "Broadcast"),
+            MessageType::BroadcastOk { .. } => write!(f, "BroadcastOk"),
+            MessageType::BroadcastRead { .. } => write!(f, "BroadcastRead"),
+            MessageType::BroadcastReadOk { .. } => write!(f, "BroadcastReadOk"),
+            MessageType::Topology { .. } => write!(f, "Topology"),
+            MessageType::TopologyOk { .. } => write!(f, "TopologyOk"),
         }
     }
 }
@@ -116,6 +146,8 @@ pub trait MessageTypeFields {
     fn msg_id(&self) -> Option<usize>;
     fn echo(&self) -> Option<&String>;
     fn in_reply_to(&self) -> Option<usize>;
+    fn broadcast_msg(&self) -> Option<usize>;
+    fn node_own_topology(&self) -> Option<&HashMap<String, Vec<String>>>;
 }
 
 // Implement `MessageFields` for `Message`
@@ -180,6 +212,7 @@ impl MessageTypeFields for MessageType {
         match self {
             MessageType::Echo { msg_id, .. } | MessageType::EchoOk { msg_id, .. } => Some(*msg_id),
             MessageType::GenerateOk { msg_id, .. } => Some(*msg_id),
+            MessageType::BroadcastOk { msg_id, .. } => Some(*msg_id),
             _ => None,
         }
     }
@@ -192,10 +225,26 @@ impl MessageTypeFields for MessageType {
     }
 
     fn in_reply_to(&self) -> Option<usize> {
-        if let MessageType::EchoOk { in_reply_to, .. } = self {
+        if let MessageType::EchoOk { in_reply_to, .. } | MessageType::GenerateOk { in_reply_to, .. } | MessageType::BroadcastOk { in_reply_to, .. }= self {
             Some(*in_reply_to)
         } else {
             None
         }
+    }
+
+    fn broadcast_msg(&self) -> Option<usize> {
+        if let MessageType::Broadcast { message, .. } = self {
+            Some(*message)
+        } else {
+            None
+        }
+    }
+
+    fn node_own_topology(&self) -> Option<&HashMap<String, Vec<String>>> {
+        if let MessageType::Topology { topology, .. } = self {
+            Some(topology)
+        } else {
+            None
+        } 
     }
 }

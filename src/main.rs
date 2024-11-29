@@ -10,7 +10,7 @@ async fn main() {
 
   let implementation: Implementation = Implementation::EAGER;
   let message_execution_target = MessageExecutionType::StdOut;
-  let (tx, mut rx) = mpsc::channel::<String>(100);
+  let (tx, rx) = mpsc::channel::<String>(100);
 
   let cluster: Cluster = Cluster::create(1, rx);
  
@@ -25,7 +25,7 @@ async fn main() {
     let mut std_input = String::new();
 
     match io::stdin().read_line(&mut std_input) {
-      Ok(line) => {
+      Ok(_line) => {
         
         // If next STDIN message is exit, break from loop and return from session
         if std_input.trim().to_lowercase() == "exit" {

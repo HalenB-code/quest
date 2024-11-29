@@ -1,5 +1,5 @@
 use std::io::StdoutLock;
-use std::io::{Write, Error};
+use std::io::Write;
 
 
 // These implementations need to be back by a implementation model that reflects the type

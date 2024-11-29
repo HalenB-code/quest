@@ -12,6 +12,8 @@ pub enum ClusterExceptions {
     UnkownClientRequest { error_message: String },
     ClusterDoesNotHaveAnyNodes { error_message: String },
     FailedToRetrieveNodeFromCluster { error_message: String },
+    ClusterMessengerFailedToFetchRequest { error_message: String },
+    ClusterMessengerFailedToReQueueReceivedRequest { error_message: String },
     // Add other error types here
 }
 
@@ -51,6 +53,12 @@ impl fmt::Display for ClusterExceptions {
             },
             ClusterExceptions::FailedToRetrieveNodeFromCluster { error_message } => {
                 write!(f, "Failed to retrieve Node '{}' from the cluster.", error_message)
+            },
+            ClusterExceptions::ClusterMessengerFailedToFetchRequest { error_message } => {
+                write!(f, "Failed to retrieve request '{}' from the cluster messenger.", error_message)
+            },
+            ClusterExceptions::ClusterMessengerFailedToReQueueReceivedRequest { error_message } => {
+                write!(f, "Failed to requeue message '{}' dervied from initial request.", error_message)
             }
         }
     }
