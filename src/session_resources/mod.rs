@@ -6,3 +6,6 @@ pub mod session;
 pub mod exceptions;
 pub mod messenger;
 pub mod warnings;
+pub mod datastore;
+pub mod transactions;
+pub mod write_ahead_log;

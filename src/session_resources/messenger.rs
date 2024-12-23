@@ -17,28 +17,12 @@ impl Messenger {
         Self { message_requests: Arc::new(Mutex::new(VecDeque::new())), message_responses: Arc::new(Mutex::new(VecDeque::new())), message_record: HashMap::new( ) }
     }
 
-    pub async fn queue(&mut self, incoming_request: String) -> Result<Message, ClusterExceptions> {
-
+    pub async fn categorize(&mut self, incoming_request: String) -> Result<Message, ClusterExceptions> {
         let message_request = message::message_deserializer(&incoming_request)?;
-
-        let message_ref = self.message_record
-        .keys()
-        .max()
-        .unwrap_or(&0_usize) + 1;
-
-        self.message_record
-        .insert(message_ref, message_request.clone());
-
-        self.message_requests
-        .lock()
-        .await
-        .push_back(message_request.clone());
-
         Ok(message_request)
-
     }
 
-    pub async fn requeue(&mut self, incoming_request: Message) -> Result<Message, ClusterExceptions> {
+    pub async fn request_queue(&mut self, incoming_request: Message) -> Result<(), ClusterExceptions> {
 
         let message_ref = self.message_record
         .keys()
@@ -51,36 +35,41 @@ impl Messenger {
         self.message_requests
         .lock()
         .await
-        .push_back(incoming_request.clone());
+        .push_back(incoming_request);
 
-        Ok(incoming_request)
+        Ok(())
+
+    }
+
+    pub async fn response_queue(&mut self, incoming_request: Message) -> Result<(), ClusterExceptions> {
+
+        let message_ref = self.message_record
+        .keys()
+        .max()
+        .unwrap_or(&0_usize) + 1;
+
+        self.message_record
+        .insert(message_ref, incoming_request.clone());
+
+        self.message_responses
+        .lock()
+        .await
+        .push_back(incoming_request);
+
+        Ok(())
 
     }
 
     pub async fn dequeue(&mut self) -> Option<Message> {
+        let mut queue = self.message_requests.lock().await;
 
-        let next_message = self.message_requests
-        .lock()
-        .await
-        .pop_front();
-
-        match &next_message {
-            Some(message) => {
-
-                let message_ref = self.message_record
-                .keys()
-                .max()
-                .unwrap_or(&0_usize) + 1;
-        
-                self.message_record
-                .insert(message_ref, message.clone());
-
-            return next_message;
-
-            },
-            None => {
-                None
-            }
+        let next_message = queue.pop_front();
+    
+        if let Some(message) = &next_message {
+            let message_ref = self.message_record.keys().max().unwrap_or(&0_usize) + 1;
+            self.message_record.insert(message_ref, message.clone());
         }
+        next_message
     }
+    
 }

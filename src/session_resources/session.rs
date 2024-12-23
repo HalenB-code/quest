@@ -1,5 +1,5 @@
 use crate::session_resources::cluster::Cluster;
-use crate::session_resources::implementation::{MessageExecutionType, Implementation};
+use crate::session_resources::implementation::Implementation;
 
 // Session Class
 // The session is created to manage the overall execution of client requests
@@ -12,7 +12,6 @@ pub struct Session {
   pub session_id: String,
   pub cluster: Cluster,
   pub implementation_type: Implementation,
-  pub message_output_target: MessageExecutionType
 }
 
 // Need to add eager/lazy execution at the session level to enable streaming and batching
@@ -20,8 +19,8 @@ pub struct Session {
 // should be implemented once received or as part of DAG
 impl Session {
   // Add create method to tie session to cluster
-  pub fn new(cluster: Cluster, implementation_type: Implementation, message_output_target: MessageExecutionType) -> Session {
-    return Self {session_id: "999".to_string(), cluster: cluster.clone(), implementation_type: implementation_type, message_output_target: message_output_target}
+  pub fn new(cluster: Cluster, implementation_type: Implementation) -> Session {
+    return Self {session_id: "999".to_string(), cluster: cluster.clone(), implementation_type: implementation_type}
   }
   // Session execution used to handle incoming client request and execute, either lazily or eagerly
   // Might need to add Cluster object to session_context as cluster is the container for the session that all nodes are connected to and all messages will emanate to/from
@@ -31,7 +30,7 @@ impl Session {
 
       Implementation::EAGER => {
         
-        let message_allocation = self.cluster.run(self.message_output_target.clone()).await;
+        let message_allocation = self.cluster.run().await;
 
         match message_allocation {
           Ok(()) => {

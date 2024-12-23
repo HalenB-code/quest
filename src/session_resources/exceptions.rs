@@ -1,6 +1,8 @@
 use std::io;
 use serde_json;
 use std::fmt;
+use crate::session_resources::message::{Message, MessageExceptions};
+use crate::session_resources::transactions::TransactionExceptions;
 
 #[derive(Debug)]
 pub enum ClusterExceptions {
@@ -14,6 +16,12 @@ pub enum ClusterExceptions {
     FailedToRetrieveNodeFromCluster { error_message: String },
     ClusterMessengerFailedToFetchRequest { error_message: String },
     ClusterMessengerFailedToReQueueReceivedRequest { error_message: String },
+    ClusterReceivingChannelSendError { error_message: String },
+    NodeFailedToCreateDataStore { error_message: String },
+    NodeDataStoreObjectNotAvailable { error_message: String },
+    InvalidClusterRequest { error_message_1: Message, error_message_2: String },
+    MessageError(MessageExceptions),
+    TransactionError(TransactionExceptions),
     // Add other error types here
 }
 
@@ -28,6 +36,13 @@ impl From<io::Error> for ClusterExceptions {
 impl From<serde_json::Error> for ClusterExceptions {
     fn from(error: serde_json::Error) -> Self {
         ClusterExceptions::JsonError(error)
+    }
+}
+
+// Implement `From` for `serde_json::Error`
+impl From<MessageExceptions> for ClusterExceptions {
+    fn from(error: MessageExceptions) -> Self {
+        ClusterExceptions::MessageError(error)
     }
 }
 
@@ -59,7 +74,25 @@ impl fmt::Display for ClusterExceptions {
             },
             ClusterExceptions::ClusterMessengerFailedToReQueueReceivedRequest { error_message } => {
                 write!(f, "Failed to requeue message '{}' dervied from initial request.", error_message)
-            }
+            },
+            ClusterExceptions::ClusterReceivingChannelSendError { error_message } => {
+                write!(f, "Failed to requeue message '{}' dervied from initial request.", error_message)
+            },
+            ClusterExceptions::NodeFailedToCreateDataStore { error_message } => {
+                write!(f, "Node '{}' failed to create datastore.", error_message)
+            },
+            ClusterExceptions::NodeDataStoreObjectNotAvailable { error_message } => {
+                write!(f, "The request datastore object is not yet avaialble for Node '{}'.", error_message)
+            },
+            ClusterExceptions::InvalidClusterRequest { error_message_1, error_message_2 } => {
+                write!(f, "Request {:?} for Node '{}' is not valid.", error_message_1, error_message_2)
+            },
+            ClusterExceptions::MessageError(error_message) => {
+                write!(f, "Message Error occurred: '{}'", error_message)
+            },
+            ClusterExceptions::TransactionError(error_message) => {
+                write!(f, "Transaction Error occurred: '{}'", error_message)
+            },
         }
     }
 }

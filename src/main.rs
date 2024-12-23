@@ -12,9 +12,9 @@ async fn main() {
   let message_execution_target = MessageExecutionType::StdOut;
   let (tx, rx) = mpsc::channel::<String>(100);
 
-  let cluster: Cluster = Cluster::create(1, rx);
+  let cluster: Cluster = Cluster::create(1, rx, message_execution_target);
  
-  let mut session = Session::new(cluster, implementation, message_execution_target);
+  let mut session = Session::new(cluster, implementation);
   
   tokio::spawn(async move {
     session.session_execution().await;

@@ -59,10 +59,10 @@ pub enum MessageType {
         in_reply_to: usize,
     },
     // This will clash with other read requests for later challenges
-    #[serde(rename = "read")]
+    #[serde(rename = "broadcast_read")]
     BroadcastRead {
     },
-    #[serde(rename = "read_ok")]
+    #[serde(rename = "broadcast_read_ok")]
     BroadcastReadOk {
         messages: Vec<usize>
     },
@@ -71,7 +71,69 @@ pub enum MessageType {
     },
     #[serde(rename = "topology_ok")]
     TopologyOk {
-
+    },    #[serde(rename = "add")]
+    VectorAdd {
+        delta: String
+    },
+    #[serde(rename = "add_ok")]
+    VectorAddOk {
+    },
+    #[serde(rename = "read")]
+    VectorRead {
+    },
+    #[serde(rename = "read_ok")]
+    VectorReadOk {
+        value: String
+    },    
+    Send {
+        key: String,
+        msg: String
+    },
+    #[serde(rename = "send_ok")]
+    SendOk {
+        offset: usize
+    },    
+    Poll {
+        offsets: HashMap<String, usize>
+    },
+    #[serde(rename = "commit_offsets")]
+    PollOk {
+        // Structure in return is String "k1" => [[offset, value], [offset, value]]
+        msgs: HashMap<String, Vec<Vec<usize>>>
+    },
+    #[serde(rename = "commit_offsets")]
+    CommitOffsets {
+        offsets: HashMap<String, usize>
+    },
+    #[serde(rename = "commit_offsets_ok")]
+    CommitOffsetsOk {
+    },
+    #[serde(rename = "list_commited_offsets")]
+    ListCommitedOffsets {
+        keys: Vec<String>
+    },
+    #[serde(rename = "list_commited_offsets_ok")]
+    ListCommitedOffsetsOk {
+        offsets: HashMap<String, usize>
+    },
+    #[serde(rename = "txn")]
+    Transaction {
+        txn: Vec<Vec<String>>
+    },
+    #[serde(rename = "txn_ok")]
+    TransactionOk {
+        txn: Vec<Vec<String>>
+    },
+    KeyValueRead {
+        key: String
+    },
+    KeyValueReadOk {
+    },
+    KeyValueWrite {
+        key: String,
+        value: String
+    },
+    KeyValueWriteOk {
     }
 }
 
@@ -112,7 +174,6 @@ pub fn message_serializer(output_message: &Message) -> Result<String> {
     serde_json::to_string(output_message)
 }
 
-
 impl fmt::Display for MessageType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -126,6 +187,24 @@ impl fmt::Display for MessageType {
             MessageType::BroadcastReadOk { .. } => write!(f, "BroadcastReadOk"),
             MessageType::Topology { .. } => write!(f, "Topology"),
             MessageType::TopologyOk { .. } => write!(f, "TopologyOk"),
+            MessageType::VectorAdd { .. } => write!(f, "VectorAdd"),
+            MessageType::VectorAddOk { .. } => write!(f, "VectorAddOk"),
+            MessageType::VectorRead { .. } => write!(f, "VectorRead"),
+            MessageType::VectorReadOk { .. } => write!(f, "VectorReadOk"),
+            MessageType::Send { .. } => write!(f, "Send"),
+            MessageType::SendOk { .. } => write!(f, "SendOk"),
+            MessageType::Poll { .. } => write!(f, "Poll"),
+            MessageType::PollOk { .. } => write!(f, "PollOk"),
+            MessageType::CommitOffsets { .. } => write!(f, "CommitOffsets"),
+            MessageType::CommitOffsetsOk { .. } => write!(f, "CommitOffsetsOk"),
+            MessageType::ListCommitedOffsets { .. } => write!(f, "ListCommitedOffsets"),
+            MessageType::ListCommitedOffsetsOk { .. } => write!(f, "ListCommitedOffsetsOk"),
+            MessageType::Transaction { .. } => write!(f, "Transaction"),
+            MessageType::TransactionOk { .. } => write!(f, "TransactionOk"),
+            MessageType::KeyValueRead { .. } => write!(f, "KeyValueRead"),
+            MessageType::KeyValueReadOk { .. } => write!(f, "KeyValueReadOk"),
+            MessageType::KeyValueWrite { .. } => write!(f, "KeyValueRead"),
+            MessageType::KeyValueWriteOk { .. } => write!(f, "KeyValueReadOk"),                
         }
     }
 }
@@ -148,10 +227,17 @@ pub trait MessageTypeFields {
     fn in_reply_to(&self) -> Option<usize>;
     fn broadcast_msg(&self) -> Option<usize>;
     fn node_own_topology(&self) -> Option<&HashMap<String, Vec<String>>>;
+    fn delta(&self) -> Option<&String>;
+    fn kv_key(&self) -> Option<&String>;
+    fn kv_value(&self) -> Option<&String>;
+    fn offsets(&self) -> Option<&HashMap<String, usize>>;
+    fn keys(&self) -> Option<&Vec<String>>;
+    fn txn(&self) -> Option<&Vec<Vec<String>>>;
 }
 
 // Implement `MessageFields` for `Message`
 impl MessageFields for Message {
+
     fn msg_type(&self) -> Option<&String> {
         if let Message::Init { msg_type, .. } = self {
             Some(msg_type)
@@ -246,5 +332,71 @@ impl MessageTypeFields for MessageType {
         } else {
             None
         } 
+    }
+
+    fn delta(&self) -> Option<&String> {
+        if let MessageType::VectorAdd { delta, .. } = self {
+            Some(delta)
+        } else {
+            None
+        } 
+    }
+
+    fn kv_key(&self) -> Option<&String> {
+        if let MessageType::Send { key, .. } = self {
+            Some(key)
+        } else {
+            None
+        } 
+    }
+
+    fn kv_value(&self) -> Option<&String> {
+        if let MessageType::Send { msg, .. } = self {
+            Some(msg)
+        } else {
+            None
+        } 
+    }
+
+    fn offsets(&self) -> Option<&HashMap<String, usize>> {
+        if let MessageType::Poll { offsets, .. } = self {
+            Some(offsets)
+        } else {
+            None
+        }
+    }
+
+    fn keys(&self) -> Option<&Vec<String>> {
+        if let MessageType::ListCommitedOffsets { keys, .. } = self {
+            Some(keys)
+        } else {
+            None
+        }
+    }
+
+    fn txn(&self) -> Option<&Vec<Vec<String>>> {
+        if let MessageType::Transaction { txn, .. } = self {
+            Some(txn)
+        } else {
+            None
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum MessageExceptions {
+    PollOffsetsError,
+    CommitOffsetsError,
+    ListCommitedOffsetsError,
+}
+
+
+impl fmt::Display for MessageExceptions {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            MessageExceptions::PollOffsetsError => write!(f, "Error polling offsets"),
+            MessageExceptions::CommitOffsetsError => write!(f, "Error committing offsets"),
+            MessageExceptions::ListCommitedOffsetsError => write!(f, "Error list committed offsets"),
+        }
     }
 }

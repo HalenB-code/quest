@@ -1,0 +1,26 @@
+Ok(Init { msg_type: "init", msg_id: 1, node_id: "n1", node_ids: ["n2"] })
+Queue before pop: [Init { msg_type: "init", msg_id: 1, node_id: "n1", node_ids: ["n2"] }]
+Queue after pop: []
+Node n1 has been connected to cluster-1
+Queue after pop: []
+
+Ok(Request { src: "c1", dest: "n1", body: Broadcast { message: 5 } })
+Queue before pop: [Request { src: "c1", dest: "n1", body: Broadcast { message: 5 } }]
+Queue after pop: []
+Request { src: "c1", dest: "n1", body: Broadcast { message: 5 } } in process_requests
+n1 is active
+
+In propogate loop for n2
+Ok(Init { msg_type: "init", msg_id: 1, node_id: "n2", node_ids: ["n3"] })
+Queue before pop: [Init { msg_type: "init", msg_id: 1, node_id: "n2", node_ids: ["n3"] }]
+Queue after pop: []
+Node n2 has been connected to cluster-1
+Queue after pop: []
+
+Ok(Request { src: "c1", dest: "n1", body: Broadcast { message: 5 } })
+Queue before pop: [Request { src: "c1", dest: "n1", body: Broadcast { message: 5 } }]
+Queue after pop: []
+Request { src: "c1", dest: "n1", body: Broadcast { message: 5 } } in process_requests
+n2 is active
+In propogate loop for n3
+Ok(Request { src: "c1", dest: "n1", body: Broadcast { message: 5 } })
