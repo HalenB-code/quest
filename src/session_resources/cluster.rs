@@ -1,19 +1,21 @@
-use crate::session_resources::message::Message;
+use crate::session_resources::message::{Message, MessageType, MessageFields, MessageTypeFields};
 use std::collections::{HashMap, BTreeMap};
 use crate::session_resources::node::Node;
 use crate::session_resources::implementation::MessageExecutionType;
-use crate::session_resources::message::{MessageType, MessageFields, MessageTypeFields};
+use crate::session_resources::message::message_serializer;
 use crate::session_resources::messenger::Messenger;
 use crate::session_resources::exceptions::ClusterExceptions;
 use crate::session_resources::warnings::ClusterWarnings;
+use crate::session_resources::config::ClusterConfig;
 use crate::session_resources::datastore::{ClusterDataStoreTypes, ClusterDataStoreObjects, ClusterDataStoreTrait, ClusterVector};
 use crate::session_resources::transactions::{TransactionManager, TransactionExceptions};
+use crate::session_resources::file_system::FileSystemManager;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 use std::fmt::Debug;
 use std::hash::Hash;
 
-const WAL_PATH: &str = "";
+// const WAL_PATH: &str = r"C:\rust\projects\rust-bdc";
 
 // Cluster Class
 // Collection of nodes that will interact to achieve a task
@@ -26,7 +28,9 @@ pub struct Cluster {
     pub nodes: BTreeMap<String, Node>,
     pub node_message_log: HashMap<usize, (Message, String)>,
     pub datastore: HashMap<ClusterDataStoreTypes, Box<dyn ClusterDataStoreTrait>>,
-    pub transaction_manager: TransactionManager
+    pub transaction_manager: TransactionManager,
+    pub cluster_configuration: ClusterConfig,
+    pub file_system_manager: FileSystemManager,
   }
   
   impl Cluster {
@@ -34,7 +38,12 @@ pub struct Cluster {
       cluster_reference: usize, 
       incoming_message_handler: mpsc::Receiver<String>,
       execution_target: MessageExecutionType,
+      source_path: String,
     ) -> Self {
+
+      let cluster_config = ClusterConfig::read_config(source_path);
+      let wal_path = &cluster_config.working_directory.wal_path;
+      let file_system_accessibility = &cluster_config.working_directory.file_system_type;
 
       Self { 
         cluster_id: format!("cluster-{cluster_reference}"), 
@@ -44,7 +53,9 @@ pub struct Cluster {
         nodes: BTreeMap::new(), 
         node_message_log: HashMap::new(),
         datastore: HashMap::new(),
-        transaction_manager: TransactionManager::new(WAL_PATH)
+        transaction_manager: TransactionManager::new(wal_path.clone().as_str()),
+        cluster_configuration: cluster_config.clone(),
+        file_system_manager: FileSystemManager::new(file_system_accessibility)
       }
     }
 
@@ -406,296 +417,53 @@ where
 
     }
   
+    pub fn read_data_from_file(&mut self, file_path: String) -> Result<String, ClusterExceptions> {
+
+      // Receive read request message
+      // File path retrieved from request
+      // Nodes are retrieved from cluster
+      // File path is added to file manager record
+      // Byte ordinals are generated for file based on nodes
+      // Transaction message is created that has a read request for each node with ordinal positions
+      // Depending on the FileSystemType, read is either receive bytes from home client and write to local file
+      // or, read existing file on distributed file share
+      // Read transaction completed or failed
+
+      // Get nodes
+      let nodes = self.get_nodes();
+
+      // Inserts hash of file path into FileSystemManager
+      if let Ok(file_path_hash) = self.file_system_manager.read_from_file(file_path.clone(), &nodes) {
+
+        // Open new transaction
+        if let Some(ref mut transaction) = Message::default_request_message(MessageType::Transaction { txn: vec![] } ) {
+          transaction.set_src("cluster-orch".to_string());
+
+          // TODO
+          // This will pull Node from first element in vector which is not guaranteed to be n1
+          transaction.set_dest(nodes[0].clone());
+
+          let file_system_type = self.cluster_configuration.working_directory.file_system_type.clone();
+
+          if let Some(file_object) = self.file_system_manager.files.get(&file_path_hash) {
+            transaction.set_body(MessageType::Transaction { txn: vec![vec!["rf".to_string(), file_path.clone(), file_system_type.to_string(), file_object.to_string_for("partition_ordinals").unwrap()]] });
+          } else {
+            return Err(ClusterExceptions::UnkownClientRequest { error_message: file_path });
+          }
+
+          if let Ok(request_string) = message_serializer(&transaction) {
+            return Ok(request_string);
+          } else {
+            return Err(ClusterExceptions::UnkownClientRequest { error_message: file_path });
+          }
+
+        } else {
+          return Err(ClusterExceptions::UnkownClientRequest { error_message: file_path });
+        }
+    } else {
+      return Err(ClusterExceptions::UnkownClientRequest { error_message: file_path });
+    }
+
   }
 
-
-
-//   use tokio::time::{sleep, Duration};
-// use std::collections::{VecDeque, HashMap};
-// // use anyhow::{anyhow, Result};
-
-// #[derive(Debug)]
-// struct Node {
-//     id: usize,
-//     nodes: Vec<String>,
-//     msg_in: VecDeque<usize>,
-//     msg_out: Vec<usize>
-// }
-
-// impl Node {
-//     async fn say_hi(&self) {
-//         println!("Hi from node {}", &self.id);
-//     }
-
-//     async fn process_msg(&mut self, msg: usize) {
-    
-//         self.msg_in.push_back(msg);
-        
-//         let msg_to_process = self.msg_in.pop_front();
-        
-//         match msg_to_process {
-//             Some(usize) => {
-            
-//             self.msg_out.push(msg);
-//             println!("Msg {} processed by {}", msg, self.id);
-//             sleep(Duration::from_millis(10)).await;
-                
-//             },
-//             None => { }
-//         }
-//     }
-// }
-
-// struct Cluster {
-//     id: String,
-//     nodes: HashMap<String, Node>
-// }
-
-// impl Cluster {
-//     async fn communicate(&mut self, msg: usize) {
-//         for (node_id, node) in &mut self.nodes {
-//             node.say_hi().await;
-//             node.process_msg(msg).await;
-//         }
-//     }
-// }
-
-// #[tokio::main]
-// async fn main() {
-
-//     let mut node_a = Node { id: 1, nodes: vec![2], msg_in: VecDeque::new() , msg_out: Vec::new() };
-//     let mut node_b = Node { id: 2, nodes: vec![3], msg_in: VecDeque::new() , msg_out: Vec::new() };
-//     let mut node_c = Node { id: 3, nodes: vec![1], msg_in: VecDeque::new() , msg_out: Vec::new() };
-    
-//     let mut cluster = Cluster { id: "cluster_a".to_owned(), nodes: HashMap::new() };
-    
-//     cluster.nodes.insert("n1".to_string() , node_a);
-//     cluster.nodes.insert("n2".to_string() , node_b);
-//     cluster.nodes.insert("n3".to_string() , node_c);
-
-//     // for (node_id, node) in &cluster.nodes {
-//     //     node.say_hi().await;
-//     // };
-    
-//     let handle = tokio::spawn(async move {
-    
-//         for i in 0..5 {
-//             cluster.communicate(i).await;
-//         }
-//         println!("{:?}", cluster.nodes.get("n1"));
-//     });
-
-//     let out = handle.await.unwrap();
-    
-    
-    
-//     println!("All done from main!");
-
-// }
-
-
-// V2
-
-// use tokio::time::{sleep, Duration};
-// use std::collections::{VecDeque, HashMap};
-// // use anyhow::{anyhow, Result};
-
-// #[derive(Debug)]
-// struct Node {
-//     id: usize,
-//     nodes: Vec<String>,
-//     msg_in: VecDeque<usize>,
-//     msg_out: Vec<String>
-// }
-
-// impl Node {
-//     async fn say_hi(&self) {
-//         println!("Hi from node {}", &self.id);
-//     }
-
-//     async fn process_msg(&mut self, msg: usize) {
-//         self.msg_in.push_back(msg);
-        
-//         for node in &self.nodes {
-             
-//             let msg_to_process = self.msg_in.pop_front();
-        
-//             match msg_to_process {
-//                 Some(usize) => {
-                
-//                 self.msg_out.push(format!("msg {} node {}", msg, node));
-//                 println!("Msg {} processed by {} for node {}", msg, self.id, node);
-//                 sleep(Duration::from_millis(10)).await;
-                    
-//                 },
-//                 None => { }
-//             }       
-//         }
-
-//     }
-// }
-
-// struct Cluster {
-//     id: String,
-//     nodes: HashMap<String, Node>
-// }
-
-// impl Cluster {
-//     async fn communicate(&mut self, msg_block: Vec<usize>) {
-//         for (node_id, node) in &mut self.nodes {
-//             node.say_hi().await;
-            
-//             for msg in &msg_block {
-//                 node.process_msg(*msg).await;
-//             }
-//         }
-//     }
-// }
-
-// #[tokio::main]
-// async fn main() {
-
-//     let mut node_a = Node { id: 1, nodes: vec!["n2".to_string()], msg_in: VecDeque::new() , msg_out: Vec::new() };
-//     let mut node_b = Node { id: 2, nodes: vec!["n3".to_string()], msg_in: VecDeque::new() , msg_out: Vec::new() };
-//     let mut node_c = Node { id: 3, nodes: vec!["n1".to_string()], msg_in: VecDeque::new() , msg_out: Vec::new() };
-    
-//     let mut cluster = Cluster { id: "cluster_a".to_owned(), nodes: HashMap::new() };
-    
-//     cluster.nodes.insert("n1".to_string() , node_a);
-//     cluster.nodes.insert("n2".to_string() , node_b);
-//     cluster.nodes.insert("n3".to_string() , node_c);
-
-//     // for (node_id, node) in &cluster.nodes {
-//     //     node.say_hi().await;
-//     // };
-    
-//     let handle = tokio::spawn(async move {
-        
-//         let msg_block = (0..5).collect::<Vec<usize>>();
-        
-//         cluster.communicate(msg_block).await;
-        
-//          println!("{:?}", cluster.nodes.get("n1"));
-        
-//     });
-
-//     let out = handle.await.unwrap();
-    
-    
-    
-//     println!("All done from main!");
-
-// }
-
-// V3
-
-// use tokio::sync::{mpsc, Mutex};
-// use tokio::time::{sleep, Duration};
-// use std::collections::{HashMap, VecDeque};
-// use std::sync::Arc;
-
-// #[derive(Debug)]
-// struct Node {
-//     id: usize,
-//     nodes: Vec<String>,
-//     msg_in: Arc<Mutex<VecDeque<usize>>>,
-//     msg_out: Arc<Mutex<Vec<String>>>,
-// }
-
-// impl Node {
-//     async fn process_msgs(&self) {
-//         loop {
-//             let mut msg_in = self.msg_in.lock().await;
-//             if let Some(msg) = msg_in.pop_front() {
-//                 drop(msg_in); // Release the lock before processing the message
-
-//                 for node in &self.nodes {
-//                     let mut msg_out = self.msg_out.lock().await;
-//                     msg_out.push(format!("Processed msg {} by node {} for node {}", msg, self.id, node));
-//                     drop(msg_out); // Release the lock
-//                     println!("Processed msg {} by node {} for node {}", msg, self.id, node);
-
-//                     sleep(Duration::from_millis(10)).await; // Simulate async processing delay
-//                 }
-//             } else {
-//                 // Sleep briefly to avoid busy-waiting
-//                 sleep(Duration::from_millis(10)).await;
-//             }
-//         }
-//     }
-// }
-
-// struct Cluster {
-//     nodes: HashMap<String, Arc<Node>>,
-// }
-
-// impl Cluster {
-//     async fn send_message(&self, target: &str, msg: usize) {
-//         if let Some(node) = self.nodes.get(target) {
-//             let mut msg_in = node.msg_in.lock().await;
-//             msg_in.push_back(msg);
-//             println!("Message {} sent to node {}", msg, target);
-//         }
-//     }
-
-//     async fn broadcast(&self, msg_block: Vec<usize>) {
-//         for (target, _) in &self.nodes {
-//             for &msg in &msg_block {
-//                 self.send_message(target, msg).await;
-//             }
-//         }
-//     }
-// }
-
-// #[tokio::main]
-// async fn main() {
-//     let node_a = Arc::new(Node {
-//         id: 1,
-//         nodes: vec!["n2".to_string()],
-//         msg_in: Arc::new(Mutex::new(VecDeque::new())),
-//         msg_out: Arc::new(Mutex::new(Vec::new())),
-//     });
-//     let node_b = Arc::new(Node {
-//         id: 2,
-//         nodes: vec!["n3".to_string()],
-//         msg_in: Arc::new(Mutex::new(VecDeque::new())),
-//         msg_out: Arc::new(Mutex::new(Vec::new())),
-//     });
-//     let node_c = Arc::new(Node {
-//         id: 3,
-//         nodes: vec!["n1".to_string()],
-//         msg_in: Arc::new(Mutex::new(VecDeque::new())),
-//         msg_out: Arc::new(Mutex::new(Vec::new())),
-//     });
-
-//     let cluster = Cluster {
-//         nodes: HashMap::from([
-//             ("n1".to_string(), node_a.clone()),
-//             ("n2".to_string(), node_b.clone()),
-//             ("n3".to_string(), node_c.clone()),
-//         ]),
-//     };
-
-//     // Start processing messages for all nodes in the background
-//     for node in cluster.nodes.values() {
-//         let node_clone = node.clone();
-//         tokio::spawn(async move {
-//             node_clone.process_msgs().await;
-//         });
-//     }
-
-//     // Simulate sending messages
-//     let msg_block = vec![1, 2, 3, 4, 5];
-//     cluster.broadcast(msg_block).await;
-
-//     // Allow some time for nodes to process messages
-//     sleep(Duration::from_secs(2)).await;
-
-//     // Display message logs for each node
-//     for (id, node) in &cluster.nodes {
-//         let msg_out = node.msg_out.lock().await;
-//         println!("Node {} outgoing messages: {:?}", id, *msg_out);
-//     }
-
-//     println!("Cluster communication complete.");
-// }
+}

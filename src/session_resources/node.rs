@@ -23,20 +23,32 @@ use super::datastore::{KeyValue, Vector};
 #[derive(Clone, Debug)]
 pub struct Node {
     pub node_id: String,
+    pub node_role_type: NodeRoleType,
     pub other_node_ids: Vec<String>,
     pub node_memory_space: HashMap<String, Vec<usize>>,
     pub message_requests: Arc<Mutex<VecDeque<Message>>>,
     pub message_responses: Arc<Mutex<VecDeque<Message>>>,
     pub message_record: Arc<Mutex<HashMap<usize, Message>>>,
     pub node_datastore: HashMap<NodeDataStoreTypes, Box<dyn NodeDataStoreTrait>>,
-  }
+}
+
+#[derive(Debug, Clone)]
+pub enum NodeRoleType {
+    Leader,
+    Follower
+}
   
   impl Node {
     // Create new instance of Node if not already in existance; existance determined by entry in nodes collection as multiple nodes may be created
     pub async fn create(client_request: &Message) -> Self {
+
+    let node_name = (*client_request.node_id().unwrap()).clone();
+
       // Init enum used to determine whether incoming message is Init or Request
       Self { 
-        node_id: (*client_request.node_id().unwrap()).clone(), 
+        node_id: node_name.clone(),
+        // FIFS: First In, First Selected as leader
+        node_role_type: if node_name == "n1".to_string() {NodeRoleType::Leader} else {NodeRoleType::Follower},
         other_node_ids: (*client_request.node_ids().unwrap()).to_owned(),
         node_memory_space: HashMap::new(),
         message_requests: Arc::new(Mutex::new(VecDeque::new())), 

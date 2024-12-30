@@ -1,0 +1,4 @@
+[working_directory]
+wal_path = "C:\rust\projects\rust-bdc\wal.txt"
+local_path = "C:\rust\projects\rust-bdc"
+file_system_type = "Replicate"

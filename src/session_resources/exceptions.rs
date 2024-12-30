@@ -3,6 +3,7 @@ use serde_json;
 use std::fmt;
 use crate::session_resources::message::{Message, MessageExceptions};
 use crate::session_resources::transactions::TransactionExceptions;
+use crate::session_resources::file_system::FileSystemExceptions;
 
 #[derive(Debug)]
 pub enum ClusterExceptions {
@@ -22,6 +23,8 @@ pub enum ClusterExceptions {
     InvalidClusterRequest { error_message_1: Message, error_message_2: String },
     MessageError(MessageExceptions),
     TransactionError(TransactionExceptions),
+    ConfigError(TransactionExceptions),
+    FileSystemError(FileSystemExceptions)
     // Add other error types here
 }
 
@@ -92,6 +95,12 @@ impl fmt::Display for ClusterExceptions {
             },
             ClusterExceptions::TransactionError(error_message) => {
                 write!(f, "Transaction Error occurred: '{}'", error_message)
+            },
+            ClusterExceptions::ConfigError(error_message) => {
+                write!(f, "Config Error occurred: '{}'", error_message)
+            },
+            ClusterExceptions::FileSystemError(error_message) => {
+                write!(f, "File System Error occurred: '{}'", error_message)
             },
         }
     }

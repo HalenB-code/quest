@@ -3,6 +3,7 @@ use std::collections::{HashMap, BTreeMap, VecDeque};
 use serde::{Serialize, Deserialize};
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
+use serde_json;
 
 use crate::session_resources::message::{MessageFields, MessageType, MessageTypeFields, Message};
 use crate::session_resources::exceptions::ClusterExceptions;
@@ -12,7 +13,8 @@ use crate::session_resources::write_ahead_log::{WalEntry, WriteAheadLog};
 #[derive(Debug, Clone, Hash, Eq, PartialEq, Serialize, Deserialize)]
 pub enum TransactionTypes {
     Read,
-    Write
+    Write,
+    ReadFile
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -29,10 +31,15 @@ pub struct Action {
 }
 
 impl Action {
-    pub fn build(action: TransactionTypes, target: &String, value: &String, message: Message, remote: Option<String>) -> Result<Self, ClusterExceptions> {
+    pub fn build(action: TransactionTypes, steps: &HashMap<String, String>, message: Message, remote: Option<String>) -> Result<Self, ClusterExceptions> {
+
+        let steps = steps.clone();
 
         match action {
             TransactionTypes::Read => {
+
+                let target = steps.get(&"key".to_string()).unwrap().to_string();
+                let value = steps.get(&"value".to_string()).unwrap().to_string();
                 // Read is 1 action
                 return Ok( Action { 
                     key: TransactionTypes::Read, 
@@ -46,6 +53,9 @@ impl Action {
                 } );
             },
             TransactionTypes::Write => {
+                let target = steps.get(&"key".to_string()).unwrap().to_string();
+                let value = steps.get(&"value".to_string()).unwrap().to_string();
+
                 // Write is 2 actions: Local & Remote writes
                 match remote {
                     Some(other_node) => {
@@ -75,6 +85,26 @@ impl Action {
                         } );
                     }
                 }
+            },
+            TransactionTypes::ReadFile => {
+                let path = steps.get(&"path".to_string()).unwrap().to_string();
+                let file_system_type = steps.get(&"file_type".to_string()).unwrap().to_string();
+                let ordinals = steps.get(&"byte_ordinals".to_string()).unwrap().to_string();
+                let schema = steps.get(&"schema".to_string()).unwrap().to_string();
+
+                return Ok( Action { 
+                    key: TransactionTypes::ReadFile, 
+                    value: Some( Message::Request { 
+                        src: message.src().unwrap().clone(), 
+                        dest: message.dest().unwrap().clone(), 
+                        body: MessageType::ReadFromFile { 
+                            file_path: path.clone(),
+                            accessibility: file_system_type.clone(),
+                            bytes: ordinals,
+                            schema: schema
+                        } 
+                    } ) 
+                } );
             }
         }
         
@@ -90,12 +120,98 @@ pub struct Transaction {
 }
 
 impl Transaction {
+
     pub fn new(id: usize) -> Self {
         Transaction {
             id,
             state: TransactionState::Pending,
             actions: Vec::new(),
             locks: Vec::new(),
+        }
+    }
+
+    // Hardcoding expected parameters passed for each action to have tighter checks when building instructions
+    pub fn hash_transaction_steps(&self, action_type: &String, steps: Vec<String>) -> Result<(TransactionTypes, HashMap<String, String>), ClusterExceptions> {
+        let mut action_steps: HashMap<String, String> = HashMap::new();
+
+        match action_type.as_str() {
+            x if x == "r" => {
+
+                if steps.len() == 3_usize {
+                    action_steps.insert("key".to_string(), steps[1].clone());
+                    action_steps.insert("value".to_string(), steps[2].clone());
+                    return Ok((TransactionTypes::Read, action_steps));
+                } else {
+                    return Err(ClusterExceptions::TransactionError(TransactionExceptions::TransactionInstructionSetError));
+                }
+
+            },
+            x if x == "w" => {      
+
+                if steps.len() == 3_usize {                   
+                    action_steps.insert("key".to_string(), steps[1].clone());
+                    action_steps.insert("value".to_string(), steps[2].clone());
+                    return Ok((TransactionTypes::Write, action_steps));
+                } else {
+                    return Err(ClusterExceptions::TransactionError(TransactionExceptions::TransactionInstructionSetError));
+                }
+            },
+            x if x == "rf" => {
+                if steps.len() == 5_usize {   
+                    action_steps.insert("path".to_string(), steps[1].clone());
+                    action_steps.insert("file_type".to_string(), steps[2].clone());
+                    action_steps.insert("byte_ordinals".to_string(), steps[3].clone());
+                    action_steps.insert("schema".to_string(), steps[4].clone());
+                    return Ok((TransactionTypes::ReadFile, action_steps));
+                } else {
+                    return Err(ClusterExceptions::TransactionError(TransactionExceptions::TransactionInstructionSetError));
+                }
+            },
+            _ => {
+                return Err(ClusterExceptions::TransactionError(TransactionExceptions::TransactionInstructionSetError));
+            }
+        }
+    }
+
+    pub fn unhash_transaction_steps(&self, action_type: TransactionTypes, hash_steps: HashMap<String, String>) -> Result<Vec<String>, ClusterExceptions> {
+        let mut action_steps: Vec<String> = Vec::new();
+
+        match action_type {
+            TransactionTypes::Read => {
+
+                if hash_steps.keys().len() == 3_usize {
+                    action_steps.push("r".to_string());
+                    action_steps.push(hash_steps.get(&"key".to_string()).unwrap().to_string());
+                    action_steps.push(hash_steps.get(&"value".to_string()).unwrap().to_string());
+                    return Ok(action_steps);
+                } else {
+                    return Err(ClusterExceptions::TransactionError(TransactionExceptions::TransactionInstructionSetError));
+                }
+
+            },
+            TransactionTypes::Write => {      
+
+                if hash_steps.len() == 3_usize {                   
+                    action_steps.push("w".to_string());
+                    action_steps.push(hash_steps.get(&"key".to_string()).unwrap().to_string());
+                    action_steps.push(hash_steps.get(&"value".to_string()).unwrap().to_string());
+                    return Ok(action_steps);
+                } else {
+                    return Err(ClusterExceptions::TransactionError(TransactionExceptions::TransactionInstructionSetError));
+                }
+            },
+            TransactionTypes::ReadFile => {
+                if hash_steps.len() == 5_usize {  
+                    action_steps.push("rf".to_string());
+                    action_steps.push(hash_steps.get(&"path".to_string()).unwrap().to_string());
+                    action_steps.push(hash_steps.get(&"file_type".to_string()).unwrap().to_string());
+                    action_steps.push(hash_steps.get(&"byte_ordinals".to_string()).unwrap().to_string());
+                    action_steps.push(hash_steps.get(&"schema".to_string()).unwrap().to_string());
+                    return Ok(action_steps);
+                } else {
+                    return Err(ClusterExceptions::TransactionError(TransactionExceptions::TransactionInstructionSetError));
+                }
+            }
         }
     }
 
@@ -107,40 +223,49 @@ impl Transaction {
 
             for instruction in instructions {
 
-                // For now we assuming transaction step structure is three parts
-                if let 3 = instruction.len() {
-                    
-                    let action = &instruction.clone()[0];
-                    let target = &instruction.clone()[1];
-                    let value = &instruction.clone()[2];
+                let action = &instruction.clone()[0];
 
+                let (action_type, action_steps) = self.hash_transaction_steps(action, instruction.clone())?;
 
-                    match action.as_str() {
-                        x if x == "r" => {
-                            if let Ok(built_action) = Action::build(TransactionTypes::Read, target, value, transaction_request.clone(), None) {
+                match action_type {
+                    TransactionTypes::Read => {
+                        if (action_steps.len() - &instruction[1..].len()) == 0 {
+
+                            if let Ok(built_action) = Action::build(TransactionTypes::Read, &action_steps, transaction_request.clone(), None) {
                                 self.actions.push(built_action);
                             } else {
                                 return Err(ClusterExceptions::TransactionError(TransactionExceptions::TransactionInstructionSetError));
                             }
-                            
-                        },
-                        x if x == "w" => {                            
+                        } else {
+                                return Err(ClusterExceptions::TransactionError(TransactionExceptions::TransactionInstructionSetError));
+                            }
+                    },
+                    TransactionTypes::Write => {   
+                        if (action_steps.len() - &instruction[1..].len()) == 0 {
+
                             for other_node in other_nodes.clone().into_iter() {
-                                if let Ok(built_action) = Action::build(TransactionTypes::Write, target, value, transaction_request.clone(), Some(other_node)) {
+                                if let Ok(built_action) = Action::build(TransactionTypes::Write, &action_steps, transaction_request.clone(), Some(other_node)) {
                                     self.actions.push(built_action);
                                 } else {
                                     return Err(ClusterExceptions::TransactionError(TransactionExceptions::TransactionInstructionSetError));
                                 }
                             };
-                            
-                        },
-                        _ => {
-                            return Err(ClusterExceptions::TransactionError(TransactionExceptions::TransactionInstructionSetError));
-                        }
-                    }
 
-                } else {
-    
+                        } else {
+                                return Err(ClusterExceptions::TransactionError(TransactionExceptions::TransactionInstructionSetError));
+                            }
+                    },
+                    TransactionTypes::ReadFile => {                 
+                        let byte_ordinals: HashMap<String, String> = serde_json::from_str(&instruction[3])?;
+                        for (node, _bytes) in byte_ordinals.clone().into_iter() {
+                            if let Ok(built_action) = Action::build(TransactionTypes::ReadFile, &action_steps, transaction_request.clone(), Some(node)) {
+                                self.actions.push(built_action);
+                            } else {
+                                return Err(ClusterExceptions::TransactionError(TransactionExceptions::TransactionInstructionSetError));
+                            }
+                        };
+                        
+                    }
                 }
             }
 

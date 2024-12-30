@@ -2,6 +2,7 @@ use serde::{Serialize, Deserialize};
 use serde_json::Result;
 use std::fmt;
 use std::collections::HashMap;
+use crate::session_resources::file_system::FileSystemType;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(untagged, rename_all = "lowercase")]
@@ -134,6 +135,14 @@ pub enum MessageType {
         value: String
     },
     KeyValueWriteOk {
+    },
+    ReadFromFile {
+        file_path: String,
+        accessibility: String,
+        bytes: String,
+        schema: String
+    },
+    ReadFromFileOk{
     }
 }
 
@@ -177,7 +186,7 @@ pub fn message_serializer(output_message: &Message) -> Result<String> {
 impl fmt::Display for MessageType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            MessageType::Echo { .. }=> write!(f, "Echo"),
+            MessageType::Echo { .. } => write!(f, "Echo"),
             MessageType::EchoOk { .. } => write!(f, "EchoOk"),
             MessageType::Generate { .. } => write!(f, "Generate"),
             MessageType::GenerateOk { .. } => write!(f, "GenerateOk"),
@@ -204,7 +213,9 @@ impl fmt::Display for MessageType {
             MessageType::KeyValueRead { .. } => write!(f, "KeyValueRead"),
             MessageType::KeyValueReadOk { .. } => write!(f, "KeyValueReadOk"),
             MessageType::KeyValueWrite { .. } => write!(f, "KeyValueRead"),
-            MessageType::KeyValueWriteOk { .. } => write!(f, "KeyValueReadOk"),                
+            MessageType::KeyValueWriteOk { .. } => write!(f, "KeyValueReadOk"), 
+            MessageType::ReadFromFile { .. } => write!(f, "ReadFromFile"),
+            MessageType::ReadFromFileOk { .. } => write!(f, "ReadFromFileOk"),            
         }
     }
 }
@@ -218,6 +229,14 @@ pub trait MessageFields {
     fn src(&self) -> Option<&String>;
     fn dest(&self) -> Option<&String>;
     fn body(&self) -> Option<&MessageType>;
+
+    fn set_msg_type(&mut self, msg_type: String);
+    fn set_msg_id(&mut self, msg_id: usize);
+    fn set_node_id(&mut self, node_id: String);
+    fn set_node_ids(&mut self, node_ids: Vec<String>);
+    fn set_src(&mut self, src: String);
+    fn set_dest(&mut self, dest: String);
+    fn set_body(&mut self, body: MessageType);
 }
 
 // Trait to access fields in `MessageType`
@@ -233,6 +252,10 @@ pub trait MessageTypeFields {
     fn offsets(&self) -> Option<&HashMap<String, usize>>;
     fn keys(&self) -> Option<&Vec<String>>;
     fn txn(&self) -> Option<&Vec<Vec<String>>>;
+    fn file_path(&self) -> Option<&String>;
+    fn file_system_type(&self) -> Option<&String>;
+
+    fn set_txn(&mut self, new_txn: Vec<Vec<String>>);
 }
 
 // Implement `MessageFields` for `Message`
@@ -288,6 +311,57 @@ impl MessageFields for Message {
         match self {
             Message::Request { body, .. } | Message::Response { body, .. } => Some(body),
             _ => None,
+        }
+    }
+
+    fn set_msg_type(&mut self, update_msg_type: String) {
+        if let Message::Init { ref mut msg_type, .. } = self {
+            *msg_type = update_msg_type;
+        }
+    }
+
+    fn set_msg_id(&mut self, update_msg_id: usize) {
+        if let Message::Init { ref mut msg_id, .. } = self {
+            *msg_id = update_msg_id;
+        }
+    }
+
+    fn set_node_id(&mut self, update_node_id: String) {
+        if let Message::Init { ref mut node_id, .. } = self {
+            *node_id = update_node_id;
+        }
+    }
+
+    fn set_node_ids(&mut self, update_node_ids: Vec<String>) {
+        if let Message::Init { ref mut node_ids, .. } = self {
+            *node_ids = update_node_ids;
+        }
+    }
+
+    fn set_src(&mut self, update_src: String) {
+        match self {
+            Message::Request { ref mut src, .. } | Message::Response { ref mut src, .. } => {
+                *src = update_src
+            }
+            _ => {}
+        }
+    }
+
+    fn set_dest(&mut self, update_dest: String) {
+        match self {
+            Message::Request { ref mut dest, .. } | Message::Response { ref mut dest, .. } => {
+                *dest = update_dest
+            }
+            _ => {}
+        }
+    }
+
+    fn set_body(&mut self, update_body: MessageType) {
+        match self {
+            Message::Request { ref mut body, .. } | Message::Response { ref mut body, .. } => {
+                *body = update_body
+            }
+            _ => {}
         }
     }
 }
@@ -381,6 +455,31 @@ impl MessageTypeFields for MessageType {
             None
         }
     }
+
+    fn file_path(&self) -> Option<&String> {
+        if let MessageType::ReadFromFile { file_path, .. } = self {
+            Some(file_path)
+        } else {
+            None
+        }
+    }
+
+    fn file_system_type(&self) -> Option<&String> {
+        if let MessageType::ReadFromFile { accessibility, .. } = self {
+            Some(accessibility)
+        } else {
+            None
+        }
+    }
+
+    fn set_txn(&mut self, update_txn: Vec<Vec<String>>) {
+        match self {
+            MessageType::Transaction { ref mut txn, .. } => {
+                *txn = update_txn
+            }
+            _ => {}
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -397,6 +496,21 @@ impl fmt::Display for MessageExceptions {
             MessageExceptions::PollOffsetsError => write!(f, "Error polling offsets"),
             MessageExceptions::CommitOffsetsError => write!(f, "Error committing offsets"),
             MessageExceptions::ListCommitedOffsetsError => write!(f, "Error list committed offsets"),
+        }
+    }
+}
+
+impl Message {
+    pub fn default_request_message(message_type: MessageType) -> Option<Self> {
+        match message_type {
+            MessageType::Transaction { .. } => Some(Message::Request { 
+                src: "default".to_string(), 
+                dest: "default".to_string(), 
+                body: (
+                    MessageType::Transaction { txn: vec![] }
+                )
+            }),
+            _ => None,
         }
     }
 }

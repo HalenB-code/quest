@@ -1,5 +1,8 @@
 use crate::session_resources::cluster::Cluster;
 use crate::session_resources::implementation::Implementation;
+use crate::session_resources::exceptions::ClusterExceptions;
+use std::sync::Arc;
+use tokio::sync::{mpsc, Mutex};
 
 // Session Class
 // The session is created to manage the overall execution of client requests
@@ -12,6 +15,8 @@ pub struct Session {
   pub session_id: String,
   pub cluster: Cluster,
   pub implementation_type: Implementation,
+  pub semantic_receiving_channel: Arc<Mutex<mpsc::Receiver<String>>>,
+  pub sending_channel: mpsc::Sender<String>,
 }
 
 // Need to add eager/lazy execution at the session level to enable streaming and batching
@@ -19,8 +24,14 @@ pub struct Session {
 // should be implemented once received or as part of DAG
 impl Session {
   // Add create method to tie session to cluster
-  pub fn new(cluster: Cluster, implementation_type: Implementation) -> Session {
-    return Self {session_id: "999".to_string(), cluster: cluster.clone(), implementation_type: implementation_type}
+  pub fn new(cluster: Cluster, implementation_type: Implementation, semantic_reciver: mpsc::Receiver<String>, sender: mpsc::Sender<String>) -> Session {
+    return Self {
+      session_id: "999".to_string(), 
+      cluster: cluster.clone(), 
+      implementation_type: implementation_type,
+      semantic_receiving_channel: Arc::new(Mutex::new(semantic_reciver)),
+      sending_channel: sender
+    }
   }
   // Session execution used to handle incoming client request and execute, either lazily or eagerly
   // Might need to add Cluster object to session_context as cluster is the container for the session that all nodes are connected to and all messages will emanate to/from
@@ -29,7 +40,18 @@ impl Session {
     match self.implementation_type {
 
       Implementation::EAGER => {
+
+        let receiver_clone = Arc::clone(&self.semantic_receiving_channel);
+
+        // Lock the receiver (this avoids the temporary value issue)
+        let mut rx = receiver_clone.lock().await;
         
+        while let Some(user_request) = rx.recv().await {
+          if let Ok(internal_request) = self.map_user_request(user_request) {
+            self.sending_channel.send(internal_request);
+          }
+        }
+
         let message_allocation = self.cluster.run().await;
 
         match message_allocation {
@@ -57,5 +79,19 @@ impl Session {
       },
     }
   }
-}
 
+  pub fn map_user_request(&mut self, user_request: String) -> Result<String, ClusterExceptions> {
+
+    let (operation, input) = user_request.split_once(" ").unwrap();
+
+    match operation {
+        "read-file" => {
+            let request_string = self.cluster.read_data_from_file(input.to_string())?;
+            return Ok(request_string);
+        },
+        _ => {
+            return Err(ClusterExceptions::UnkownClientRequest { error_message: user_request.to_string() });
+        }
+    }
+  }
+}

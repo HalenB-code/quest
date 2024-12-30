@@ -349,3 +349,91 @@ where
     }
 
 }
+
+
+// Define an enum to represent dynamically typed column data
+#[derive(Debug)]
+enum ColumnData {
+    I32(Vec<i32>),
+    F64(Vec<f64>),
+    Bool(Vec<bool>),
+    String(Vec<String>),
+}
+
+#[derive(Debug, Clone)]
+enum ColumnType {
+    I32,
+    F64,
+    Bool,
+    String,
+}
+
+// Metadata for column type lookup
+struct ColumnMetadata {
+    name: String,
+    column_type: ColumnType,
+}
+
+// Infer the column type based on a sample
+fn infer_type(sample: &[String]) -> ColumnType {
+    if sample.iter().all(|val| val.parse::<i32>().is_ok()) {
+        ColumnType::I32
+    } else if sample.iter().all(|val| val.parse::<f64>().is_ok()) {
+        ColumnType::F64
+    } else if sample.iter().all(|val| val == "true" || val == "false") {
+        ColumnType::Bool
+    } else {
+        ColumnType::String
+    }
+}
+
+// Allocate columns and metadata
+fn allocate_columns(
+    raw_data: HashMap<String, Vec<String>>,
+) -> (HashMap<String, ColumnData>, HashMap<String, ColumnMetadata>) {
+    let mut typed_columns: HashMap<String, ColumnData> = HashMap::new();
+    let mut metadata: HashMap<String, ColumnMetadata> = HashMap::new();
+
+    for (column_name, values) in raw_data {
+        let sample = &values[0..usize::min(10, values.len())]; // Sample first 10 values
+        let column_type = infer_type(sample);
+
+        match &column_type {
+            ColumnType::I32 => {
+                let typed_values: Vec<i32> = values.iter().map(|val| val.parse::<i32>().unwrap()).collect();
+                typed_columns.insert(column_name.clone(), ColumnData::I32(typed_values));
+            }
+            ColumnType::F64 => {
+                let typed_values: Vec<f64> = values.iter().map(|val| val.parse::<f64>().unwrap()).collect();
+                typed_columns.insert(column_name.clone(), ColumnData::F64(typed_values));
+            }
+            ColumnType::Bool => {
+                let typed_values: Vec<bool> = values.iter().map(|val| val == "true").collect();
+                typed_columns.insert(column_name.clone(), ColumnData::Bool(typed_values));
+            }
+            ColumnType::String => {
+                typed_columns.insert(column_name.clone(), ColumnData::String(values));
+            }
+        }
+
+        metadata.insert(
+            column_name.clone(),
+            ColumnMetadata {
+                name: column_name,
+                column_type,
+            },
+        );
+    }
+
+    (typed_columns, metadata)
+}
+
+// Retrieve column data dynamically
+fn get_column<'a>(column_name: &str, typed_columns: &'a HashMap<String, ColumnData>) -> Option<&'a ColumnData> {
+    typed_columns.get(column_name)
+}
+
+
+// pub fn csv_reader(line: &[u8], first_line_is_header: bool) -> Option<Vec<String> {
+
+// }
