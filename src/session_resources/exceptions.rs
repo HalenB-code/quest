@@ -24,7 +24,8 @@ pub enum ClusterExceptions {
     MessageError(MessageExceptions),
     TransactionError(TransactionExceptions),
     ConfigError(TransactionExceptions),
-    FileSystemError(FileSystemExceptions)
+    FileSystemError(FileSystemExceptions),
+    DatastoreError(DatastoreExceptions),
     // Add other error types here
 }
 
@@ -101,6 +102,9 @@ impl fmt::Display for ClusterExceptions {
             },
             ClusterExceptions::FileSystemError(error_message) => {
                 write!(f, "File System Error occurred: '{}'", error_message)
+            },
+            ClusterExceptions::DatastoreError(error_message) => {
+                write!(f, "Datastore Error occurred: '{}'", error_message)
             },
         }
     }

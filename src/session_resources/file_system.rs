@@ -1,5 +1,5 @@
 use std::fs::File;
-use std::io::{self, Write, Read};
+use std::io::{self, BufRead, Read, Write};
 use std::path::Path;
 use memmap2::Mmap;
 use std::collections::{HashMap, BTreeMap};
@@ -12,6 +12,7 @@ use serde::Deserialize;
 
 
 use crate::session_resources::node::NodeRoleType;
+use crate::session_resources::datastore::{infer_type, ColumnData, ColumnType};
 
 use super::exceptions::ClusterExceptions;
 
@@ -53,8 +54,58 @@ impl fmt::Display for FileSystemType {
     }
 }
 
-// Configuration for the distributed file system
-const DFS_URL: &str = "http://dfs-cluster:50070/webhdfs/v1";
+pub fn get_file(file_path: String) -> Result<File, ClusterExceptions> {
+    let file: File = File::open(file_path.clone() )?;
+    Ok(file)
+}
+
+pub fn get_mmap(file_path: String) -> Result<Mmap, ClusterExceptions> {
+    let file: File = File::open(file_path.clone() )?;
+    let mmap = unsafe {  Mmap::map(&file)? };
+    Ok(mmap)
+}
+
+pub fn read_mmap_bytes(file_path: String, file_handler: Mmap, schema: HashMap<String, ColumnType>, row_terminator: u8, column_delimiter: u8) -> Result<HashMap<String, Vec<String>>, ClusterExceptions> {
+    let mut bytes = HashMap::new();
+    let mut columns = HashMap::new();
+
+    let buffer = &file_handler[..];
+
+    for (iter, line) in buffer.split(|delimiter| *delimiter == row_terminator).into_iter().enumerate() {
+        for (idx, value) in line.split(|delimiter| *delimiter == column_delimiter).into_iter().enumerate() {
+            if let Ok(asci_line) = String::from_utf8(value.to_vec()) {
+                if iter == 1 {
+
+                    if schema.contains_key(&asci_line) {
+                        bytes.insert(asci_line.clone(), vec![]);
+                        columns.insert(idx, asci_line.clone());
+                    }
+                }
+                else {
+                    if let Some(column) = columns.get_key_value(&idx) {
+                        if let Some(column_data) = bytes.get_mut(column.1) {
+                            column_data.push(asci_line);
+                        }
+                    }
+                    
+                }
+            } else {
+                return Err(ClusterExceptions::FileSystemError(FileSystemExceptions::CSVReadParseError { error_message: file_path.to_string() }));
+            }
+        }
+    }
+
+    Ok(bytes)
+}
+
+
+pub fn read_bytes_from_file(file_path: String, expected_schema: HashMap<String, ColumnType>, df_name: String) -> Self {
+
+    let mut data: HashMap<String, ColumnData> = HashMap::new();
+    let mmap = get_mmap(file_path)?;
+    let raw_data = read_mmap_bytes(file_path, mmap, expected_schema, 10, 50)?;
+    
+}
 
 impl FileSystemManager {
 
@@ -70,8 +121,7 @@ impl FileSystemManager {
         let n_threads = nodes.len();
 
         // Create file object and reader
-        let file: File = File::open(file_path.clone() )?;
-        let mmap = unsafe {  Mmap::map(&file)? };
+        let mmap = get_mmap(file_path.clone())?;
     
         // _1__ Determine number of lines in file
         let no_crlf = Arc::new(Mutex::new(0_usize));
@@ -138,26 +188,51 @@ impl FileSystemManager {
     }
 
     // For now, we will test on CSV type with | delimiter
-    pub fn get_file_header(file_path: String) -> Result<HashMap<String, String>, ClusterExceptions> {
+    pub fn get_file_header(file_path: String) -> Result<HashMap<String, ColumnType>, ClusterExceptions> {
 
-        let file: File = File::open(file_path.clone() )?;
-        let mmap = unsafe {  Mmap::map(&file)? };
+        let mmap = get_mmap(file_path.clone())?;
+        let mut schema_map: HashMap<String, ColumnType> = HashMap::new();
 
         let mut buffer: Vec<u8> = Vec::new();
-        let mut sample_counter = 50_usize;
+        let mut columns: Vec<Vec<String>> = Vec::new();
+        let mut sample_counter = 0_usize;
 
         for byte in mmap.iter() {
-
             while sample_counter < 50 {
                 buffer.push(*byte);
                 if *byte == 10 {
                     sample_counter += 1;
                 }
             }
- 
         }
 
-        Ok(HashMap::new())
+        for (iter, line) in buffer.split(|delimiter| *delimiter == 10).into_iter().enumerate() {
+            for (idx, value) in line.split(|delimiter| *delimiter == 50).into_iter().enumerate() {
+                if let Ok(asci_line) = String::from_utf8(value.to_vec()) {
+                    if iter == 1 {
+                        schema_map.insert(asci_line, ColumnType::Default);
+                        columns.push(vec![]);
+                    }
+                    else {
+                        columns[idx].push(asci_line);
+                    }
+                } else {
+                    return Err(ClusterExceptions::FileSystemError(FileSystemExceptions::CSVReadParseError { error_message: file_path }));
+                }
+            }
+        }
+
+        for (idx, column) in schema_map.clone().keys().enumerate() {
+            let sample_data = &columns[idx];
+
+            let column_schema: ColumnType = infer_type(&sample_data);
+
+            if let Some(column_type) = schema_map.get_mut(&column.to_string()) {
+                *column_type = column_schema;
+            }
+        }
+
+        Ok(schema_map)
 
     }
 
@@ -181,67 +256,6 @@ impl FileSystemManager {
 
     }
 
-    // Here we need to establish HTTP connection between cluster and node to receive bytes and write to local storage
-    // Steps:
-    // Create local working dir
-    // Establish HTTP connection on specific port
-    // Create file
-    // Open file
-    // Stream bytes from socket into file
-    // Commence file reading into datastore
-    // Fetches data from the distributed file system
-    // fn fetch_from_dfs(file_path: &str, local_temp_path: &str, accessibility: FileSystemType) -> io::Result<()> {
-    //     let client = Client::new();
-    //     let dfs_url = format!("{DFS_URL}{file_path}?op=OPEN");
-
-    //     println!("Fetching data from DFS: {dfs_url}");
-    //     let response = client.get(&dfs_url).send().unwrap();
-
-    //     if response.status().is_success() {
-    //         let mut file = File::create(local_temp_path)?;
-    //         file.write_all(&response.bytes().unwrap())?;
-    //         println!("Data saved locally to {}", local_temp_path);
-    //         Ok(())
-    //     } else {
-    //         Err(io::Error::new(
-    //             io::ErrorKind::Other,
-    //             "Failed to fetch data from DFS",
-    //         ))
-    //     }
-    // }
-
-    // /// Processes the data locally (simple word count in this example)
-    // fn process_data(local_file_path: &str) -> io::Result<u32> {
-    //     let mut file = File::open(local_file_path)?;
-    //     let mut contents = String::new();
-    //     file.read_to_string(&mut contents)?;
-        
-    //     // Perform a word count
-    //     let word_count = contents.split_whitespace().count() as u32;
-    //     println!("Word count: {}", word_count);
-
-    //     Ok(word_count)
-    // }
-
-    // /// Writes the result back to the distributed file system
-    // fn write_to_dfs(file_path: &str, data: &str) -> io::Result<()> {
-    //     let client = Client::new();
-    //     let dfs_url = format!("{DFS_URL}{file_path}?op=CREATE&overwrite=true");
-
-    //     println!("Writing result to DFS: {dfs_url}");
-    //     let response = client.put(&dfs_url).body(data.to_string()).send().unwrap();
-
-    //     if response.status().is_success() {
-    //         println!("Result successfully written to DFS");
-    //         Ok(())
-    //     } else {
-    //         Err(io::Error::new(
-    //             io::ErrorKind::Other,
-    //             "Failed to write data to DFS",
-    //         ))
-    //     }
-    // }
-
 }
 
 #[derive(Debug, Clone)]
@@ -250,6 +264,8 @@ pub enum FileSystemExceptions {
     FailedToReadFromFile { error_message: String },
     FailedToMapFile { error_message: String },
     FileReadFailed { error_message: String },
+    CSVReadParseError { error_message: String },
+    FailedToInferFileSchema { error_message: String },
 }
 
 
@@ -260,6 +276,8 @@ impl fmt::Display for FileSystemExceptions {
             FileSystemExceptions::FailedToReadFromFile { error_message} => write!(f, "Failed to read data from file at path '{}'.", error_message),
             FileSystemExceptions::FailedToMapFile { error_message} => write!(f, "Failed to map file at path '{}'.", error_message),
             FileSystemExceptions::FileReadFailed { error_message} => write!(f, "Failed to map file at path '{}' - it has already been read.", error_message),
+            FileSystemExceptions::CSVReadParseError { error_message} => write!(f, "Failed to parse data in CSV format at path '{}'.", error_message),
+            FileSystemExceptions::FailedToInferFileSchema { error_message} => write!(f, "Failed to infer schema of file at path '{}'.", error_message),
         }
     }
 }

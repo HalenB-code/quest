@@ -4,7 +4,7 @@ use crate::session_resources::implementation::{MessageExecutionType, StdOut};
 use crate::session_resources::message::{MessageFields, MessageExceptions};
 use crate::session_resources::exceptions::ClusterExceptions;
 use crate::session_resources::cluster::Cluster;
-use crate::session_resources::datastore::{NodeDataStoreTypes, NodeDataStoreTrait, NodeDataStoreObjects, ClusterDataStoreTypes, ClusterDataStoreObjects};
+use crate::session_resources::datastore::{DataFrame, Column};
 
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -16,10 +16,12 @@ use std::hash::Hash;
 use std::collections::{HashMap, VecDeque};
 use std::fmt::Debug;
 
-use super::datastore::{KeyValue, Vector};
-
+//
 // Node Class
 // Node is the execution unit of a cluster
+//
+
+
 #[derive(Clone, Debug)]
 pub struct Node {
     pub node_id: String,
@@ -29,7 +31,52 @@ pub struct Node {
     pub message_requests: Arc<Mutex<VecDeque<Message>>>,
     pub message_responses: Arc<Mutex<VecDeque<Message>>>,
     pub message_record: Arc<Mutex<HashMap<usize, Message>>>,
-    pub node_datastore: HashMap<NodeDataStoreTypes, Box<dyn NodeDataStoreTrait>>,
+    pub datastore: HashMap<String, DataFrame>,
+}
+
+pub trait NodeDataStoreTrait {
+    fn get_dataframe(&self, name: &str) -> Option<&DataFrame>;
+    fn get_dataframe_mut(&mut self, name: &str) -> Option<&mut DataFrame>;
+    fn insert_dataframe(&mut self, name: String, df: DataFrame);
+}
+
+impl Node {
+    pub fn get_dataframe(&self, name: &str) -> Option<&DataFrame> {
+        self.datastore.get(name)
+    }
+
+    pub fn get_dataframe_mut(&mut self, name: &str) -> Option<&mut DataFrame> {
+        self.datastore.get_mut(name)
+    }
+
+    pub fn insert_dataframe(&mut self, name: String, df: DataFrame) {
+        self.datastore.insert(name, df);
+    }
+
+    pub fn append_to_dataframe(&mut self, name: &str, new_row: HashMap<String, Column>, append_new: bool) {
+        if let Some(df) = self.get_dataframe_mut(name) {
+            df.append_row(new_row, append_new);
+        }
+    }
+
+    pub fn mutate_dataframe<F>(&mut self, name: &str, filter: F, mutation_func: fn(&mut Column))
+    where
+        F: Fn(&DataFrame) -> bool,
+    {
+        if let Some(df) = self.get_dataframe_mut(name) {
+            if filter(df) {
+                for col in df.columns.values_mut() {
+                    mutation_func(col);
+                }
+            }
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, Hash)]
+pub enum NodeDataStoreTypes {
+    DataFrameStore,
+    // Other types can be added here
 }
 
 #[derive(Debug, Clone)]
@@ -54,50 +101,10 @@ pub enum NodeRoleType {
         message_requests: Arc::new(Mutex::new(VecDeque::new())), 
         message_responses: Arc::new(Mutex::new(VecDeque::new())), 
         message_record: Arc::new(Mutex::new(HashMap::new())),
-        node_datastore: HashMap::new(),
+        datastore: HashMap::new(),
       }
     }
 
-    pub async fn get_vector_store<T>(&mut self) -> Option<&Vec<T>>
-    where
-        T: Clone + Eq + std::hash::Hash + Send + Sync + 'static + std::fmt::Debug,
-    {
-        let node_datastore = self.node_datastore.get(&NodeDataStoreTypes::Vector);
-        if let Some(store) = node_datastore {
-            if let Some(concrete_store) = store.as_any().downcast_ref::<NodeDataStoreObjects<T>>()
-            {
-                // Extract NodeVector<T> and return its Arc<Mutex<Vec<T>>>
-                if let NodeDataStoreObjects::Vector(vector) = concrete_store {
-                    return Some(&vector.data);
-                }
-            }
-        }
-  
-        None
-    }
-
-    pub async fn get_kv_store<T>(&self) -> Option<&KeyValue<T>>
-    where
-        T: Clone + Eq + std::hash::Hash + Send + Sync + 'static + std::fmt::Debug,
-    {
-        let node_datastore = &self.node_datastore.get(&NodeDataStoreTypes::KeyValue);
-        if let Some(store) = node_datastore {
-            if let Some(concrete_store) = store.as_any().downcast_ref::<NodeDataStoreObjects<T>>() {
-                // Extract NodeVector<T> and return its Arc<Mutex<Vec<T>>>
-                if let NodeDataStoreObjects::KeyValue(kv_log) = concrete_store {
-                    return Some(&kv_log);
-                }
-            }
-        }
-        None
-    }
-
-    pub fn register_datastore<T>(&mut self, typ: NodeDataStoreTypes, store: NodeDataStoreObjects<T>)
-    where
-        T: Clone + Eq + Hash + Send + Sync + 'static + Debug,
-    {
-        self.node_datastore.insert(typ, Box::new(store));
-    }
 
     pub async fn process_requests(
       &mut self,
@@ -224,37 +231,59 @@ pub enum NodeRoleType {
                           };
                       },
                       MessageType::VectorAdd { .. } => {
-                        cluster.lock().await.propagate_update(message.clone()).await?;
-  
-                        message_response = Message::Response {
-                            src: message.dest().unwrap().to_string(),
-                            dest: message.src().unwrap().to_string(),
-                            body: MessageType::VectorAddOk {},
+
+                        // A VectorAdd is a global counter that needs to be consistent across nodes, eventually
+                        // Hence a VectorAdd request leads to 1) update on receiving node and 2) a series of follow up requests to update all other nodes so they are consistent
+                        if let Some(delta) = message.body().unwrap().delta() {
+                            
+                            if let None = self.get_dataframe(&"df_vector".to_string()) {
+                                let mut insert_data = HashMap::new();
+                                insert_data.insert("Counter".to_string(), delta.as_str());
+
+                                let df = DataFrame::new(Some(insert_data));
+                                self.insert_dataframe("df_vector".to_string(), df);
+                            }
+
+                            // Now build additional VectorAdd requests, exlcuding calling node
+                            let other_nodes = self.other_node_ids.clone().into_iter().filter(|n| n != &self.node_id).collect::<Vec<String>>();
+
+                            for other_node in other_nodes {
+
+                                let delta_request = Message::Request {
+                                    src: self.node_id,
+                                    dest: other_node,
+                                    body: MessageType::VectorAdd { 
+                                        delta: delta.clone()
+                                    }
+                                };
+
+                                cluster.lock().await.propagate_message(delta_request).await?;
+
+                            }
+
+                            message_response = Message::Response {
+                                src: message.dest().unwrap().to_string(),
+                                dest: message.src().unwrap().to_string(),
+                                body: MessageType::VectorAddOk {},
+                            };
                         };
                       },
                       MessageType::VectorRead { .. } => {
-                        let mut vector_return = String::new();
-                        let cluster_lock = cluster.lock().await;
 
-                        // TODO
-                        // Method to manage the accessing of the datastore objects
-                        if let Some(store) = cluster_lock.datastore.get(&ClusterDataStoreTypes::Vector) {
-                            if let Some(vector_store) = store.as_any().downcast_ref::<ClusterDataStoreObjects<String>>() {
-                                if let ClusterDataStoreObjects::Vector(data) = vector_store {
-                                    if let Some(string) = data.dump().await {
-                                        vector_return = string;
-                                    }
-                                }
+                        let df = self.get_dataframe_mut(&"df_vector".to_string());
+
+                        if let Some(df) = df {
+                            if let Some(global_counter) = df.sum("Counter".to_string()) {
+  
+                            message_response = Message::Response {
+                                src: message.dest().unwrap().to_string(),
+                                dest: message.src().unwrap().to_string(),
+                                body: MessageType::VectorReadOk { 
+                                    value: global_counter.to_string()
+                                },
+                            };
                             }
                         }
-  
-                        message_response = Message::Response {
-                            src: message.dest().unwrap().to_string(),
-                            dest: message.src().unwrap().to_string(),
-                            body: MessageType::VectorReadOk { 
-                                value: vector_return
-                            },
-                        }; 
                       },
                       MessageType::Send { .. } => {
                         // TODO
@@ -263,12 +292,20 @@ pub enum NodeRoleType {
                             
                             if let Some(value) = message.body().unwrap().kv_value() {
 
-                                if let None = self.get_kv_store::<String>().await {
-                                    self.register_datastore(NodeDataStoreTypes::KeyValue, NodeDataStoreObjects::KeyValue(KeyValue::<String>::create()));
+                                if let None = self.get_dataframe(&"df_keyvalue".to_string()) {
+                                    let mut insert_data = HashMap::new();
+                                    insert_data.insert(key.to_string(), value.to_string());
+
+                                    let df = DataFrame::new(Some(insert_data));
+                                    self.insert_dataframe("df_keyvalue".to_string(), df);
                                 }
 
-                                if let Some(kv_log_store) = self.get_kv_store().await {
-                                    if let Some( return_offset ) = kv_log_store.clone().insert_offsets(key, value.clone()) {
+                                let df = self.get_dataframe_mut(&"df_keyvalue".to_string());
+
+                                if let Some(df) = df {
+                                    let mut offset_data = HashMap::new();
+                                    offset_data.insert(key.clone(), value.clone());
+                                    if let Some(return_offset) = df.insert_offsets(offset_data) {
 
                                         message_response = Message::Response {
                                             src: message.dest().unwrap().to_string(),
@@ -305,11 +342,11 @@ pub enum NodeRoleType {
                     },
                     MessageType::Poll { .. } => {
 
-                        if let Some(kv_log_store) = self.get_kv_store::<String>().await {
+                        if let Some(df) = self.get_dataframe_mut(&"df_keyvalue".to_string()) {
 
                             if let Some(msg_offsets) = message.body().unwrap().offsets() {
 
-                                if let Some(return_offsets) = kv_log_store.get_offsets(msg_offsets.clone()) {
+                                if let Ok(return_offsets) = df.get_offsets(msg_offsets.clone()) {
 
                                     message_response = Message::Response {
                                         src: message.dest().unwrap().to_string(),
@@ -333,11 +370,11 @@ pub enum NodeRoleType {
                     },
                     MessageType::CommitOffsets { .. } => {
 
-                        if let Some(kv_log_store) = self.get_kv_store::<String>().await {
+                        if let Some(df) = self.get_dataframe_mut(&"df_keyvalue".to_string()) {
 
                             if let Some(msg_offsets) = message.body().unwrap().offsets() {
 
-                                if let Ok(()) = kv_log_store.clone().commit_offsets(msg_offsets.clone()) {
+                                if let Ok(()) = df.committ_offsets(msg_offsets.clone()) {
 
                                     message_response = Message::Response {
                                         src: message.dest().unwrap().to_string(),
@@ -360,11 +397,11 @@ pub enum NodeRoleType {
                     },
                     MessageType::ListCommitedOffsets { .. } => {
 
-                        if let Some(kv_log_store) = self.get_kv_store::<String>().await {
+                        if let Some(df) = self.get_dataframe_mut(&"df_keyvalue".to_string()) {
 
                             if let Some(keys) = message.body().unwrap().keys() {
 
-                                if let Some(committed_offsets) = kv_log_store.list_commited_offsets(keys.clone()) {
+                                if let Ok(committed_offsets) = df.list_committed_offsets(keys.clone()) {
 
                                     message_response = Message::Response {
                                         src: message.dest().unwrap().to_string(),
@@ -384,7 +421,34 @@ pub enum NodeRoleType {
                         } else {
                             return Err(ClusterExceptions::MessageError(MessageExceptions::ListCommitedOffsetsError));
                         }
-                    }
+                    },
+                    MessageType::ReadFromFile { .. } => {
+
+                        if let Some(dataframe) = self.get_kv_store::<String>().await {
+
+                            if let Some(msg_offsets) = message.body().unwrap().offsets() {
+
+                                if let Some(return_offsets) = kv_log_store.get_offsets(msg_offsets.clone()) {
+
+                                    message_response = Message::Response {
+                                        src: message.dest().unwrap().to_string(),
+                                        dest: message.src().unwrap().to_string(),
+                                        body: MessageType::PollOk {
+                                            msgs: return_offsets
+                                        }
+                                    };
+                                }
+                                else {
+                                    return Err(ClusterExceptions::MessageError(MessageExceptions::PollOffsetsError));
+                                }
+                            }
+                            else {
+                                return Err(ClusterExceptions::MessageError(MessageExceptions::PollOffsetsError));
+                            }
+                        } else {
+                            return Err(ClusterExceptions::MessageError(MessageExceptions::PollOffsetsError));
+                        }
+                    },
                     _ => { 
                         return Err(ClusterExceptions::UnkownClientRequest {
                             error_message: "Response type not yet created".to_string(),
@@ -456,13 +520,3 @@ pub enum NodeRoleType {
     
 
   }
-
-
-// trait Agentic {
-//     pub fn create();
-//     pub fn remove();
-//     pub fn coordinator_response();
-//     pub fn coordinator_inform();
-//     pub fn agent_response();
-//     pub fn agent_inform();
-// };

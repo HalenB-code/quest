@@ -7,7 +7,6 @@ use crate::session_resources::messenger::Messenger;
 use crate::session_resources::exceptions::ClusterExceptions;
 use crate::session_resources::warnings::ClusterWarnings;
 use crate::session_resources::config::ClusterConfig;
-use crate::session_resources::datastore::{ClusterDataStoreTypes, ClusterDataStoreObjects, ClusterDataStoreTrait, ClusterVector};
 use crate::session_resources::transactions::{TransactionManager, TransactionExceptions};
 use crate::session_resources::file_system::FileSystemManager;
 use std::sync::Arc;
@@ -27,7 +26,6 @@ pub struct Cluster {
     pub messenger: Messenger,
     pub nodes: BTreeMap<String, Node>,
     pub node_message_log: HashMap<usize, (Message, String)>,
-    pub datastore: HashMap<ClusterDataStoreTypes, Box<dyn ClusterDataStoreTrait>>,
     pub transaction_manager: TransactionManager,
     pub cluster_configuration: ClusterConfig,
     pub file_system_manager: FileSystemManager,
@@ -52,7 +50,6 @@ pub struct Cluster {
         messenger: Messenger::create(), 
         nodes: BTreeMap::new(), 
         node_message_log: HashMap::new(),
-        datastore: HashMap::new(),
         transaction_manager: TransactionManager::new(wal_path.clone().as_str()),
         cluster_configuration: cluster_config.clone(),
         file_system_manager: FileSystemManager::new(file_system_accessibility)
@@ -135,7 +132,15 @@ pub struct Cluster {
           self.process_initialization(message_request).await?;
       },
       Message::Request { .. } => {
-        self.messenger.request_queue(message_request).await?;
+        match message_request.msg_type().unwrap().as_str() {
+          "txn" => {
+            self.categorize_and_queue_transactions(message_request).await?;
+          },
+          _ => {
+            self.messenger.request_queue(message_request).await?;
+          }
+
+        }
       },
       Message::Response { .. } => {
         return Err(ClusterExceptions::UnkownClientRequest {
@@ -183,93 +188,16 @@ async fn complete_transaction(&mut self, message_request: Message) -> Result<(),
 
 }
 
-pub async fn categorize_and_queue_transactions(&mut self, incoming_message: String) -> Result<(), ClusterExceptions> {
-
-  let message_request = self.messenger.categorize(incoming_message).await?;
+pub async fn categorize_and_queue_transactions(&mut self, txn_message: Message) -> Result<(), ClusterExceptions> {
 
   // TODO Assign msg_id based on global log and set status to out
 
-  match message_request {
-    Message::Init { .. } => {
-        self.process_initialization(message_request).await?;
-    },
-    Message::Request { .. } => {
+  self.complete_transaction(txn_message).await?;
 
-      if let Some(typ) = message_request.msg_type() {
-        match typ.as_str() {
-          "txn" => {
-
-            self.complete_transaction(message_request).await?;
-
-          },
-          _ => {
-            self.messenger.request_queue(message_request).await?;
-          }
-        }
-      }
-      
-    },
-    Message::Response { .. } => {
-      return Err(ClusterExceptions::UnkownClientRequest {
-        error_message: message_request.dest().unwrap().to_string(),
-      });
-    }
-  }
-
-
-  
   // TODO If no error comes back, set status to ok in global log
 
   Ok(())
 }
-
-pub fn register_datastore<T>(&mut self, typ: ClusterDataStoreTypes, store: ClusterDataStoreObjects<T>)
-where
-    T: Clone + Eq + Hash + Send + Sync + 'static + Debug,
-{
-    self.datastore.insert(typ, Box::new(store));
-}
-
-pub async fn propagate_update(&mut self, message: Message) -> Result<(), ClusterExceptions> {
-  match message.body() {
-    Some( MessageType::VectorAdd { .. } ) => {
-      let datastore_object_check = &self.datastore.contains_key(&ClusterDataStoreTypes::Vector);
-
-      match datastore_object_check {
-        false => {
-          self.register_datastore(
-            ClusterDataStoreTypes::Vector,
-            ClusterDataStoreObjects::Vector(ClusterVector::<String>::create()),
-        );
-        
-        },
-        true => {
-          ()
-        }
-      }
-      // TODO
-      // Here we are explicity tying String type to VectorAdd method
-      if let Some(string) = message.body().unwrap().delta() {
-        if let Some(store) = self.datastore.get(&ClusterDataStoreTypes::Vector) {
-          if let Some(vector_store) = store.as_any().downcast_ref::<ClusterDataStoreObjects<String>>() {
-            if let ClusterDataStoreObjects::Vector ( data ) = vector_store {
-              let mut locked_data = data.data.lock().await;
-              locked_data.push(string.clone())
-            }
-          }
-        }
-      }
-    },
-    _ => {
-      return Err(ClusterExceptions::UnkownClientRequest {
-        error_message: message.dest().unwrap().to_string(),
-      });
-    }
-  }
-
-  Ok(())
-}
-
 
 pub async fn propagate_message(&mut self, message: Message) -> Result<(), ClusterExceptions> {
 
@@ -297,23 +225,6 @@ pub async fn propagate_message(&mut self, message: Message) -> Result<(), Cluste
   }
 
   Ok(())
-}
-
-pub async fn get_vector_store<T>(&self) -> Option<Arc<Mutex<Vec<T>>>>
-where
-    T: Clone + Eq + std::hash::Hash + Send + Sync + 'static + std::fmt::Debug,
-{
-    if let Some(store) = self.datastore.get(&ClusterDataStoreTypes::Vector) {
-        // Downcast to ClusterDataStoreObjects<T>
-        if let Some(concrete_store) = store.as_any().downcast_ref::<ClusterDataStoreObjects<T>>()
-        {
-            // Extract ClusterVector<T> and return its Arc<Mutex<Vec<T>>>
-            if let ClusterDataStoreObjects::Vector(vector) = concrete_store {
-                return Some(Arc::clone(&vector.data));
-            }
-        }
-    }
-    None
 }
 
   pub async fn process_followups(&mut self) -> Result<(), ClusterExceptions> {
@@ -445,8 +356,11 @@ where
 
           let file_system_type = self.cluster_configuration.working_directory.file_system_type.clone();
 
+          let infered_file_schema = FileSystemManager::get_file_header(file_path.clone())?;
+          let infered_file_schema_string = serde_json::to_string(&infered_file_schema)?;
+
           if let Some(file_object) = self.file_system_manager.files.get(&file_path_hash) {
-            transaction.set_body(MessageType::Transaction { txn: vec![vec!["rf".to_string(), file_path.clone(), file_system_type.to_string(), file_object.to_string_for("partition_ordinals").unwrap()]] });
+            transaction.set_body(MessageType::Transaction { txn: vec![vec!["rf".to_string(), file_path.clone(), file_system_type.to_string(), file_object.to_string_for("partition_ordinals").unwrap(), infered_file_schema_string]] });
           } else {
             return Err(ClusterExceptions::UnkownClientRequest { error_message: file_path });
           }

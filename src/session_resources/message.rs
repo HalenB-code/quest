@@ -136,6 +136,18 @@ pub enum MessageType {
     },
     KeyValueWriteOk {
     },
+    GlobalCounterRead {
+        key: String,
+        value: String
+    },
+    GlobalCounterReadOk {
+    },
+    GlobalCounterWrite {
+        key: String,
+        value: String
+    },
+    GlobalCounterWriteOk {
+    },
     ReadFromFile {
         file_path: String,
         accessibility: String,
@@ -213,7 +225,11 @@ impl fmt::Display for MessageType {
             MessageType::KeyValueRead { .. } => write!(f, "KeyValueRead"),
             MessageType::KeyValueReadOk { .. } => write!(f, "KeyValueReadOk"),
             MessageType::KeyValueWrite { .. } => write!(f, "KeyValueRead"),
-            MessageType::KeyValueWriteOk { .. } => write!(f, "KeyValueReadOk"), 
+            MessageType::KeyValueWriteOk { .. } => write!(f, "KeyValueReadOk"),
+            MessageType::GlobalCounterRead { .. } => write!(f, "GlobalCounterRead"),
+            MessageType::GlobalCounterReadOk { .. } => write!(f, "GlobalCounterReadOk"),
+            MessageType::GlobalCounterWrite { .. } => write!(f, "GlobalCounterWrite"),
+            MessageType::GlobalCounterWriteOk { .. } => write!(f, "GlobalCounterWriteOk"),
             MessageType::ReadFromFile { .. } => write!(f, "ReadFromFile"),
             MessageType::ReadFromFileOk { .. } => write!(f, "ReadFromFileOk"),            
         }
