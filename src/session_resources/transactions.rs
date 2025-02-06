@@ -256,7 +256,7 @@ impl Transaction {
                             }
                     },
                     TransactionTypes::ReadFile => {                 
-                        let byte_ordinals: HashMap<String, String> = serde_json::from_str(&instruction[3])?;
+                        let byte_ordinals: HashMap<String, (usize, usize)> = serde_json::from_str(&instruction[3])?;
                         for (node, _bytes) in byte_ordinals.clone().into_iter() {
                             if let Ok(built_action) = Action::build(TransactionTypes::ReadFile, &action_steps, transaction_request.clone(), Some(node)) {
                                 self.actions.push(built_action);

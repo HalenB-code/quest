@@ -4,6 +4,7 @@ use std::fmt;
 use crate::session_resources::message::{Message, MessageExceptions};
 use crate::session_resources::transactions::TransactionExceptions;
 use crate::session_resources::file_system::FileSystemExceptions;
+use crate::session_resources::datastore::DatastoreExceptions;
 
 #[derive(Debug)]
 pub enum ClusterExceptions {

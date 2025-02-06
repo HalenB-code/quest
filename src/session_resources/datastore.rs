@@ -4,16 +4,11 @@ use std::{
     sync::Arc, vec,
 };
 use std::fmt::Debug;
-use std::any::Any;
 use std::fmt;
-use tokio::sync::Mutex;
 use prettytable::{Table, Row, Cell};
+use serde::{Serialize, Deserialize};
 
 use crate::session_resources::exceptions::ClusterExceptions;
-use crate::session_resources::message::MessageExceptions;
-use crate::session_resources::file_system::read_mmap_bytes;
-
-use super::file_system::get_mmap;
 
 //
 // Node objects
@@ -44,10 +39,12 @@ impl DataFrame {
         };
 
         if let Some(data) = data {
-            let inferred_data = Self.infer_type(data);
+            let inferred_data = DataFrame::infer_type(data);
 
-            for (col_name, column_values) in inferred_data {
-                df.columns.insert(col_name, column_values);
+            if let Some(inferred_data) = inferred_data {
+                for (col_name, column_values) in inferred_data {
+                    df.columns.insert(col_name, column_values);
+                }
             }
         }
 
@@ -55,7 +52,7 @@ impl DataFrame {
     }
 
     // Function to infer type from a sample
-    fn infer_type<T>(data: HashMap<String, T>) -> Option<HashMap<String, Column>>
+    pub fn infer_type<T>(data: HashMap<String, T>) -> Option<HashMap<String, Column>>
     where
     T: Into<Column>
     {
@@ -84,7 +81,7 @@ impl DataFrame {
             self.append_value(&col_name, column_value, append_new);
         }
     }
-    fn append_value(&mut self, col_name: &str, value: Column, append_new: bool) {
+    pub fn append_value(&mut self, col_name: &str, value: Column, append_new: bool) {
         match self.columns.get_mut(col_name) {
             Some(existing_col) => match (existing_col, value) {
                 (Column::IntVec(existing), Column::IntVec(mut new)) => {
@@ -138,8 +135,10 @@ impl DataFrame {
         }
     }
 
-    fn print_table(&self) {
+    pub fn print_table(&self, n_rows: Option<usize>) {
         let mut table = Table::new();
+
+        let n_rows = n_rows.unwrap_or(5);
 
         // Collect column names
         let column_names: Vec<String> = self.columns.keys().cloned().collect();
@@ -149,7 +148,7 @@ impl DataFrame {
         let max_rows = self.columns.values().map(|col| col.len()).max().unwrap_or(0);
 
         // Collect rows
-        for i in 0..max_rows {
+        for i in 0..n_rows {
             let mut row = vec![];
             for col in &column_names {
                 row.push(Cell::new(&self.columns[col].get_value_at(i)));
@@ -160,7 +159,7 @@ impl DataFrame {
         table.printstd();
     }
 
-    fn filter<F>(&self, predicate: F) -> Vec<HashMap<String, String>>
+    pub fn filter<F>(&self, predicate: F) -> Vec<HashMap<String, String>>
     where
         F: Fn(&HashMap<String, String>) -> bool,
         
@@ -188,8 +187,8 @@ impl DataFrame {
             if let Some(column) = self.columns.get(&"Key".to_string()) {
                 // Obtain the index position of the supplied key to retrieve the offsets from the corresponding Value column
                 // Limiting the impl to only non-nested Column to prevent massive string dump to std out if called on nested arrays
-                if let Some(key_column) = column.get_values() {
-                    let column_index_position_to_update = key_column.into_iter().enumerate().filter(|(index, value)| value == &key).collect();
+                if let Some(key_column) = column.get_values_as_string() {
+                    let column_index_position_to_update: Vec<_> = key_column.into_iter().enumerate().filter(|(index, value)| value == &key).map(|(index, value)| index).collect();
         
                     let filtered_data = self.filter(|row| row.get("Key").map_or(false, |v| v == &key));
 
@@ -197,12 +196,12 @@ impl DataFrame {
                         return Err(ClusterExceptions::DatastoreError(DatastoreExceptions::MultipleFilterReturnCommittOffsets { error_message: key.to_string() }));
                     } else {
                         if let Some(existing_offsets) = filtered_data[0].get(&"Status".to_string()) {
-                            let mut offset_elements = existing_offsets.split(",").map(|element| element.parse::<usize>().unwrap()).collect::<Vec<usize>>();
+                            let offset_elements = existing_offsets.split(",").map(|element| element.parse::<usize>().unwrap()).collect::<Vec<usize>>();
 
-                            offset_elements.iter().enumerate().map(|(element, index)| if index <= &offset { 1 } else {0} );
+                            offset_elements.iter().enumerate().map(|(_element, index)| if index <= &offset { 1 } else {0} );
 
                             if let Some(column_mut) = self.columns.get_mut(&"Key".to_string()) {
-                                column_mut.overwrite(offset_elements, column_index_position_to_update.1);
+                                column_mut.overwrite(offset_elements, column_index_position_to_update[0]);
                             }
                         }
                     }
@@ -275,7 +274,7 @@ impl DataFrame {
                         } else {
                             if let Some(existing_offsets) = filtered_data[0].get(&"Status".to_string()) {
                                 let offsets = existing_offsets.split(",").map(|element| element.parse::<usize>().unwrap()).collect::<Vec<usize>>();
-                                let max_committed_offset = offsets.iter().filter(|element| **element == 1).collect().len();
+                                let max_committed_offset = offsets.iter().filter(|element| **element == 1).collect::<Vec<&usize>>().len();
 
                                 return_map.insert(key, max_committed_offset);
                             }
@@ -294,7 +293,7 @@ impl DataFrame {
     pub fn get_vector(&self, column: String) -> Option<Vec<String>> {
 
         if let Some(column) = self.columns.get(&column) {
-            if let Some(key_column) = column.get_values() {
+            if let Some(key_column) = column.get_values_as_string() {
                 return Some(key_column);
             }
         }
@@ -309,7 +308,7 @@ impl DataFrame {
 
         for (key, offset) in key_value_insert.iter() {
             if let Some(column) = self.columns.get(key) {
-                if let Some(key_column) = column.get_values() {
+                if let Some(key_column) = column.get_values_as_string() {
                     return Some(key_column.len());
                 }
             }
@@ -320,18 +319,53 @@ impl DataFrame {
     pub fn sum(&self, column: String) -> Option<usize> {
 
         if let Some(column) = self.columns.get(&column) {
-            if let Some(values) = column.get_values() {
-                let sum_total = values.iter().fold(0, |acc, &x| acc + x);
-                return Some(sum_total);
+            let column_type = column.column_type();
+
+            match column_type {
+                ColumnType::IntVec => {
+                    if let Some(values) = ColumnData::<Vec<i32>>::as_data(column)  {
+                        let sum_total = values.iter().fold(0, |acc, &x| acc + x);
+                        return Some(sum_total as usize);
+                    }
+                },
+                ColumnType::FloatVec => {
+                    if let Some(values) = ColumnData::<Vec<f64>>::as_data(column)  {
+                        let sum_total = values.iter().fold(0.0, |acc, &x| acc + x);
+                        return Some(sum_total as usize);
+                    }
+                },
+                ColumnType::IntNestedVec => {
+                    if let Some(values) = ColumnData::<Vec<Vec<i32>>>::as_data(column)  {
+                        let sum_total = values.iter().fold(0, |acc, x| acc + x.iter().fold(0, |acc, &x| acc + x));
+                        return Some(sum_total as usize);
+                    }
+                },
+                ColumnType::FloatNestedVec => {
+                    if let Some(values) = ColumnData::<Vec<Vec<f64>>>::as_data(column)  {
+                        let sum_total = values.iter().fold(0.0, |acc, x| acc + x.iter().fold(0.0, |acc, &x| acc + x));
+                        return Some(sum_total as usize);
+                    }
+                },              
+                _ => {
+                    return None;
+                }
             }
         }
-
         None
     }
 
     
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ColumnType {
+    IntVec,
+    FloatVec,
+    StringVec,
+    IntNestedVec,
+    FloatNestedVec,
+    StringNestedVec,
+}
 
 // Define an enum to represent dynamically typed column data
 #[derive(Debug, Clone)]
@@ -404,7 +438,84 @@ impl From<Vec<Vec<String>>> for Column {
     }
 }
 
+trait ColumnData<T> {
+    fn as_data(&self) -> Option<&T>;
+}
+
+impl ColumnData<Vec<i32>> for Column {
+    fn as_data(&self) -> Option<&Vec<i32>> {
+        if let Column::IntVec(data) = self {
+            Some(data)
+        } else {
+            None
+        }
+    }
+}
+
+impl ColumnData<Vec<f64>> for Column {
+    fn as_data(&self) -> Option<&Vec<f64>> {
+        if let Column::FloatVec(data) = self {
+            Some(data)
+        } else {
+            None
+        }
+    }
+}
+
+impl ColumnData<Vec<String>> for Column {
+    fn as_data(&self) -> Option<&Vec<String>> {
+        if let Column::StringVec(data) = self {
+            Some(data)
+        } else {
+            None
+        }
+    }
+}
+
+impl ColumnData<Vec<Vec<i32>>> for Column {
+    fn as_data(&self) -> Option<&Vec<Vec<i32>>> {
+        if let Column::IntNestedVec(data) = self {
+            Some(data)
+        } else {
+            None
+        }
+    }
+}
+
+impl ColumnData<Vec<Vec<f64>>> for Column {
+    fn as_data(&self) -> Option<&Vec<Vec<f64>>> {
+        if let Column::FloatNestedVec(data) = self {
+            Some(data)
+        } else {
+            None
+        }
+    }
+}
+
+impl ColumnData<Vec<Vec<String>>> for Column {
+    fn as_data(&self) -> Option<&Vec<Vec<String>>> {
+        if let Column::StringNestedVec(data) = self {
+            Some(data)
+        } else {
+            None
+        }
+    }
+}
+
+
 impl Column {
+
+    pub fn column_type(&self) -> ColumnType {
+        match self {
+            Column::IntVec(_) => ColumnType::IntVec,
+            Column::FloatVec(_) => ColumnType::FloatVec,
+            Column::StringVec(_) => ColumnType::StringVec,
+            Column::IntNestedVec(_) => ColumnType::IntNestedVec,
+            Column::FloatNestedVec(_) => ColumnType::FloatNestedVec,
+            Column::StringNestedVec(_) => ColumnType::StringNestedVec,
+        }
+    }
+
     pub fn data_type(&self) -> String {
         match self {
             Column::IntVec(_) => "Int".to_string(),
@@ -427,7 +538,7 @@ impl Column {
         }
     }
 
-    pub fn get_values(&self) -> Option<Vec<String>> {
+    pub fn get_values_as_string(&self) -> Option<Vec<String>> {
         match self {
             Column::IntVec(v) => Some(v.iter().map(|element| element.to_string()).collect::<Vec<String>>()),
             Column::FloatVec(v) => Some(v.iter().map(|element| element.to_string()).collect::<Vec<String>>()),
@@ -489,26 +600,18 @@ impl Column {
     }
 
     pub fn overwrite(&mut self, value: Vec<usize>, index: usize) {
-        match (self) {
+        match self {
             Column::IntVec(v) => {
-                let value = value.iter().map().collect::<Vec<i32>();
-                *v[index] = value;
+                let value = value.iter().map(|element| *element as i32).collect::<Vec<i32>>();
+                *v = value;
             }
             Column::FloatVec(v) => {
-                let value = value.iter().map().collect::<Vec<f64>();
-                *v[index] = value;
+                let value = value.iter().map(|element| *element as f64).collect::<Vec<f64>>();
+                *v = value;
             }
             Column::StringVec(v) => {
-                let value = value.iter().map().collect::<Vec<String>();
-                *v[index] = value;
-            }
-            Column::IntNestedVec(v) => {
-                let value = value.iter().map().collect::<Vec<>();
-                *v[index] = value;
-            }
-            Column::FloatNestedVec(v) => {
-                let value = value.iter().map().collect::<Vec<>();
-                *v[index] = value;
+                let value = value.iter().map(|element| element.to_string()).collect::<Vec<String>>();
+                *v = value;
             }
             _ => panic!("Column type mismatch!"),
         }
@@ -523,6 +626,11 @@ pub enum DatastoreExceptions {
     MultipleFilterReturnCommittOffsets { error_message: String },
     ColumnDoesNotExist { error_message: String },
     OffsetsDoNotExist { error_message: String },
+    DfAlreadyExists { error_message: String },
+    FailedToSaveDf { error_message: String },
+    DfDoesNotExist { error_message: String },
+    FailedToRetrieveData { error_message: String },
+    DataTypeInferenceFailed { error_message: String },
 }
 
 
@@ -534,6 +642,11 @@ impl fmt::Display for DatastoreExceptions {
             DatastoreExceptions::MultipleFilterReturnCommittOffsets { error_message} => write!(f, "Multiple results were returned for offset filter predicate '{}'.", error_message),
             DatastoreExceptions::ColumnDoesNotExist { error_message} => write!(f, "Column '{}' does not exist in dataframe.", error_message),
             DatastoreExceptions::OffsetsDoNotExist { error_message} => write!(f, "Offsets do not exist for '{}'.", error_message),
+            DatastoreExceptions::DfAlreadyExists { error_message} => write!(f, "The data from file path '{}' has already been ingested.", error_message),
+            DatastoreExceptions::FailedToSaveDf { error_message} => write!(f, "Failed to save the df in node '{}' datastore.", error_message),
+            DatastoreExceptions::DfDoesNotExist { error_message} => write!(f, "Requested df '{}' does not exist.", error_message),
+            DatastoreExceptions::FailedToRetrieveData { error_message} => write!(f, "Failed to retrieve data for action '{}'.", error_message),
+            DatastoreExceptions::DataTypeInferenceFailed { error_message} => write!(f, "Data type inference failed for '{}'.", error_message),
         }
     }
 }

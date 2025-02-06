@@ -352,15 +352,18 @@ pub async fn propagate_message(&mut self, message: Message) -> Result<(), Cluste
 
           // TODO
           // This will pull Node from first element in vector which is not guaranteed to be n1
+          // nodes can also be empty
           transaction.set_dest(nodes[0].clone());
 
           let file_system_type = self.cluster_configuration.working_directory.file_system_type.clone();
 
           let infered_file_schema = FileSystemManager::get_file_header(file_path.clone())?;
           let infered_file_schema_string = serde_json::to_string(&infered_file_schema)?;
+          let byte_ordinals = FileSystemManager::get_byte_ordinals(file_path.clone(), &nodes)?;
+          let byte_ordinals_string = serde_json::to_string(&byte_ordinals)?;
 
           if let Some(file_object) = self.file_system_manager.files.get(&file_path_hash) {
-            transaction.set_body(MessageType::Transaction { txn: vec![vec!["rf".to_string(), file_path.clone(), file_system_type.to_string(), file_object.to_string_for("partition_ordinals").unwrap(), infered_file_schema_string]] });
+            transaction.set_body(MessageType::Transaction { txn: vec![vec!["rf".to_string(), file_path.clone(), file_system_type.to_string(), byte_ordinals_string, infered_file_schema_string]] });
           } else {
             return Err(ClusterExceptions::UnkownClientRequest { error_message: file_path });
           }
@@ -377,6 +380,33 @@ pub async fn propagate_message(&mut self, message: Message) -> Result<(), Cluste
     } else {
       return Err(ClusterExceptions::UnkownClientRequest { error_message: file_path });
     }
+
+  }
+
+  pub fn display_df(&self, df_name: String) -> Result<String, ClusterExceptions> {
+    // TODO
+    // Harcoding name for "df" for now
+
+    // TODO
+    // All nodes or not?
+    let all_nodes: bool = false;
+
+    let nodes = self.get_nodes();
+
+    // TODO
+    // Move this to transaction to cater for multiple node displays without having to handle multiple display requests at the session/cluster level
+    let message_request = Message::Request { 
+          src: "cluster-orch".to_string(), 
+          dest: nodes[0].to_string(), 
+          body: MessageType::DisplayDf { 
+            df_name: df_name, 
+            total_rows: 5
+          } 
+        };
+
+    
+    return Ok(message_serializer(&message_request)?);
+
 
   }
 

@@ -1,4 +1,11 @@
 [working_directory]
 wal_path = "C:\rust\projects\rust-bdc\wal.txt"
 local_path = "C:\rust\projects\rust-bdc"
-file_system_type = "Replicate"
+file_system_type = "Replicated"
+
+[nodes]
+local
+169.254.227.191 pi01
+169.254.227.192 pi02
+169.254.227.194 pi03
+169.254.227.195 pi04

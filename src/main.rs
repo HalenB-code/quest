@@ -56,12 +56,3 @@ async fn main() {
   println!("Main end!");
 
 }
-
-
-// TODO
-
-// Statistics
-// Logging from cluster and nodes
-// Async await execution; arc::mutex will be required on StdOut when writing from each of the nodes
-// Threading
-// DAG for lazy execution model

@@ -86,9 +86,16 @@ impl Session {
 
     match operation {
         "read-file" => {
+
+          // TODO
+          // Need to accept df name when read request received
             let request_string = self.cluster.read_data_from_file(input.to_string())?;
             return Ok(request_string);
         },
+        "display_df" => {
+          let request_string = self.cluster.display_df("df".to_string())?;
+          return Ok(request_string);
+        }
         _ => {
             return Err(ClusterExceptions::UnkownClientRequest { error_message: user_request.to_string() });
         }

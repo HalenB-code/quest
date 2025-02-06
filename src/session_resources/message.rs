@@ -155,6 +155,12 @@ pub enum MessageType {
         schema: String
     },
     ReadFromFileOk{
+    },
+    DisplayDf {
+        df_name: String,
+        total_rows: usize
+    },
+    DisplayDfOk{
     }
 }
 
@@ -231,7 +237,9 @@ impl fmt::Display for MessageType {
             MessageType::GlobalCounterWrite { .. } => write!(f, "GlobalCounterWrite"),
             MessageType::GlobalCounterWriteOk { .. } => write!(f, "GlobalCounterWriteOk"),
             MessageType::ReadFromFile { .. } => write!(f, "ReadFromFile"),
-            MessageType::ReadFromFileOk { .. } => write!(f, "ReadFromFileOk"),            
+            MessageType::ReadFromFileOk { .. } => write!(f, "ReadFromFileOk"),
+            MessageType::DisplayDf { .. } => write!(f, "DisplayDf"),
+            MessageType::DisplayDfOk { .. } => write!(f, "DisplayDfOk"),        
         }
     }
 }
@@ -268,10 +276,13 @@ pub trait MessageTypeFields {
     fn offsets(&self) -> Option<&HashMap<String, usize>>;
     fn keys(&self) -> Option<&Vec<String>>;
     fn txn(&self) -> Option<&Vec<Vec<String>>>;
-    fn file_path(&self) -> Option<&String>;
+    fn file_system_path(&self) -> Option<&String>;
     fn file_system_type(&self) -> Option<&String>;
-
+    fn file_system_bytes(&self) -> Option<&String>;
+    fn file_system_schema(&self) -> Option<&String>;
     fn set_txn(&mut self, new_txn: Vec<Vec<String>>);
+    fn df_name(&self) -> Option<&String>;
+    fn display_rows(&self) -> Option<usize>;
 }
 
 // Implement `MessageFields` for `Message`
@@ -472,7 +483,7 @@ impl MessageTypeFields for MessageType {
         }
     }
 
-    fn file_path(&self) -> Option<&String> {
+    fn file_system_path(&self) -> Option<&String> {
         if let MessageType::ReadFromFile { file_path, .. } = self {
             Some(file_path)
         } else {
@@ -488,6 +499,22 @@ impl MessageTypeFields for MessageType {
         }
     }
 
+    fn file_system_schema(&self) -> Option<&String> {
+        if let MessageType::ReadFromFile { schema, .. } = self {
+            Some(schema)
+        } else {
+            None
+        }
+    }
+
+    fn file_system_bytes(&self) -> Option<&String> {
+        if let MessageType::ReadFromFile { bytes, .. } = self {
+            Some(bytes)
+        } else {
+            None
+        }
+    }
+
     fn set_txn(&mut self, update_txn: Vec<Vec<String>>) {
         match self {
             MessageType::Transaction { ref mut txn, .. } => {
@@ -496,6 +523,23 @@ impl MessageTypeFields for MessageType {
             _ => {}
         }
     }
+
+    fn df_name(&self) -> Option<&String> {
+        if let MessageType::DisplayDf { df_name, .. } = self {
+            Some(df_name)
+        } else {
+            None
+        }
+    }
+
+    fn display_rows(&self) -> Option<usize> {
+        if let MessageType::DisplayDf { total_rows, .. } = self {
+            Some(*total_rows)
+        } else {
+            None
+        }
+    }
+
 }
 
 #[derive(Debug, Clone)]

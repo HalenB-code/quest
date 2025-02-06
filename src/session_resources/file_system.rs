@@ -10,9 +10,9 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::Hasher;
 use serde::Deserialize;
 
-
-use crate::session_resources::node::NodeRoleType;
-use crate::session_resources::datastore::{infer_type, ColumnData, ColumnType};
+use crate::session_resources::datastore::{DataFrame, Column, ColumnType};
+use crate::session_resources::message::message_serializer;
+use crate::session_resources::datastore::DatastoreExceptions;
 
 use super::exceptions::ClusterExceptions;
 
@@ -65,26 +65,31 @@ pub fn get_mmap(file_path: String) -> Result<Mmap, ClusterExceptions> {
     Ok(mmap)
 }
 
-pub fn read_mmap_bytes(file_path: String, file_handler: Mmap, schema: HashMap<String, ColumnType>, row_terminator: u8, column_delimiter: u8) -> Result<HashMap<String, Vec<String>>, ClusterExceptions> {
-    let mut bytes = HashMap::new();
+pub fn read_mmap_bytes(file_path: String, file_handler: &[u8], row_terminator: u8, column_delimiter: u8) -> Result<HashMap<String, Vec<String>>, ClusterExceptions> {
+    // Used to store the actual values relating to each column: Col_1: [Val_1, Val_2, Val_3]
+    let mut bytes: HashMap<String, Vec<String>> = HashMap::new();
+
+    // Used to store index position of value for each column: 0: Col_1, 1: Col_2, 2: Col_3
     let mut columns = HashMap::new();
 
     let buffer = &file_handler[..];
 
+    // Split buffer by row terminator
     for (iter, line) in buffer.split(|delimiter| *delimiter == row_terminator).into_iter().enumerate() {
-        for (idx, value) in line.split(|delimiter| *delimiter == column_delimiter).into_iter().enumerate() {
-            if let Ok(asci_line) = String::from_utf8(value.to_vec()) {
-                if iter == 1 {
 
-                    if schema.contains_key(&asci_line) {
-                        bytes.insert(asci_line.clone(), vec![]);
-                        columns.insert(idx, asci_line.clone());
-                    }
+        // Split line by column delimiter
+        for (idx, value) in line.split(|delimiter| *delimiter == column_delimiter).into_iter().enumerate() {
+
+            // Convert ASCII bytes to string
+            if let Ok(ascii_line) = String::from_utf8(value.to_vec()) {
+                if iter == 1 {
+                    bytes.insert(ascii_line.clone(), vec![]);
+                    columns.insert(idx, ascii_line.clone());
                 }
                 else {
                     if let Some(column) = columns.get_key_value(&idx) {
                         if let Some(column_data) = bytes.get_mut(column.1) {
-                            column_data.push(asci_line);
+                            column_data.push(ascii_line);
                         }
                     }
                     
@@ -95,16 +100,30 @@ pub fn read_mmap_bytes(file_path: String, file_handler: Mmap, schema: HashMap<St
         }
     }
 
+    
+
     Ok(bytes)
+
 }
 
+pub fn read_csv(file_path: String, byte_ordinals: String) -> Result<DataFrame, ClusterExceptions> {
 
-pub fn read_bytes_from_file(file_path: String, expected_schema: HashMap<String, ColumnType>, df_name: String) -> Self {
+    // Create file object and reader
+    let mmap = get_mmap(file_path.clone())?;
+    let bytes: (usize, usize) = serde_json::from_str(byte_ordinals.as_str())?;
+    let bytes_mmap = &mmap[bytes.0..bytes.1];
 
-    let mut data: HashMap<String, ColumnData> = HashMap::new();
-    let mmap = get_mmap(file_path)?;
-    let raw_data = read_mmap_bytes(file_path, mmap, expected_schema, 10, 50)?;
-    
+    let raw_data = read_mmap_bytes(file_path.clone(), bytes_mmap, 10, 50)?;
+    if let Some(data_inferred_types) = DataFrame::infer_type(raw_data) {
+
+        let df = DataFrame::new(Some(data_inferred_types));
+
+        Ok(df)
+
+    } else {
+        return Err(ClusterExceptions::DatastoreError(DatastoreExceptions::DataTypeInferenceFailed { error_message: file_path.clone() } ))
+    }
+
 }
 
 impl FileSystemManager {
@@ -116,7 +135,7 @@ impl FileSystemManager {
         }
     }
 
-    pub fn get_byte_ordinals(&self, file_path: String, nodes: &Vec<String>) -> Result<BTreeMap<String, (usize, usize)>, ClusterExceptions> {
+    pub fn get_byte_ordinals(file_path: String, nodes: &Vec<String>) -> Result<BTreeMap<String, (usize, usize)>, ClusterExceptions> {
 
         let n_threads = nodes.len();
 
@@ -189,12 +208,14 @@ impl FileSystemManager {
 
     // For now, we will test on CSV type with | delimiter
     pub fn get_file_header(file_path: String) -> Result<HashMap<String, ColumnType>, ClusterExceptions> {
+        let row_terminator = 10;
+        let column_delimiter = 50;
 
         let mmap = get_mmap(file_path.clone())?;
-        let mut schema_map: HashMap<String, ColumnType> = HashMap::new();
+        let mut columns: HashMap<usize, String> = HashMap::new();
 
         let mut buffer: Vec<u8> = Vec::new();
-        let mut columns: Vec<Vec<String>> = Vec::new();
+        let mut bytes: HashMap<String, Vec<String>> = HashMap::new();
         let mut sample_counter = 0_usize;
 
         for byte in mmap.iter() {
@@ -206,38 +227,47 @@ impl FileSystemManager {
             }
         }
 
-        for (iter, line) in buffer.split(|delimiter| *delimiter == 10).into_iter().enumerate() {
-            for (idx, value) in line.split(|delimiter| *delimiter == 50).into_iter().enumerate() {
-                if let Ok(asci_line) = String::from_utf8(value.to_vec()) {
+        for (iter, line) in buffer.split(|delimiter| *delimiter == row_terminator).into_iter().enumerate() {
+
+            // Split line by column delimiter
+            for (idx, value) in line.split(|delimiter| *delimiter == column_delimiter).into_iter().enumerate() {
+    
+                // Convert ASCII bytes to string
+                if let Ok(ascii_line) = String::from_utf8(value.to_vec()) {
                     if iter == 1 {
-                        schema_map.insert(asci_line, ColumnType::Default);
-                        columns.push(vec![]);
+                        bytes.insert(ascii_line.clone(), vec![]);
+                        columns.insert(idx, ascii_line.clone());
                     }
                     else {
-                        columns[idx].push(asci_line);
+                        if let Some(column) = columns.get_key_value(&idx) {
+                            if let Some(column_data) = bytes.get_mut(column.1) {
+                                column_data.push(ascii_line);
+                            }
+                        }
+                        
                     }
-                } else {
-                    return Err(ClusterExceptions::FileSystemError(FileSystemExceptions::CSVReadParseError { error_message: file_path }));
                 }
             }
         }
 
-        for (idx, column) in schema_map.clone().keys().enumerate() {
-            let sample_data = &columns[idx];
+        let mut column_schema_return: HashMap<String, ColumnType> = HashMap::new();
+        if let Some(column_schema) = DataFrame::infer_type(bytes) {
 
-            let column_schema: ColumnType = infer_type(&sample_data);
-
-            if let Some(column_type) = schema_map.get_mut(&column.to_string()) {
-                *column_type = column_schema;
+            for (column_name, column_type) in column_schema {
+                let column_variant = column_type.column_type();
+                column_schema_return.insert(column_name, column_variant);
             }
-        }
+    
+            Ok(column_schema_return)
 
-        Ok(schema_map)
+        } else {
+            return Err(ClusterExceptions::DatastoreError(DatastoreExceptions::DataTypeInferenceFailed { error_message: file_path.clone() } ));
+        }
 
     }
 
     pub fn read_from_file(&mut self, file_path: String, nodes: &Vec<String>) -> Result<usize, ClusterExceptions> {
-        if let Ok(file) = self.get_byte_ordinals(file_path.clone(), nodes) {
+        if let Ok(file) = FileSystemManager::get_byte_ordinals(file_path.clone(), nodes) {
             let mut hasher = DefaultHasher::new();
             hasher.write(file_path.as_bytes());
             let file_hash =  hasher.finish() as usize;
@@ -255,6 +285,8 @@ impl FileSystemManager {
         }
 
     }
+
+    
 
 }
 

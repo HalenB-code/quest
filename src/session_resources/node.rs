@@ -1,10 +1,11 @@
+use crate::session_resources::file_system;
 use crate::session_resources::message::{self, Message, MessageType};
 use crate::session_resources::message::MessageTypeFields;
 use crate::session_resources::implementation::{MessageExecutionType, StdOut};
 use crate::session_resources::message::{MessageFields, MessageExceptions};
 use crate::session_resources::exceptions::ClusterExceptions;
 use crate::session_resources::cluster::Cluster;
-use crate::session_resources::datastore::{DataFrame, Column};
+use crate::session_resources::datastore::{Column, DataFrame, DatastoreExceptions};
 
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -106,11 +107,7 @@ pub enum NodeRoleType {
     }
 
 
-    pub async fn process_requests(
-      &mut self,
-      message_execution_type: MessageExecutionType,
-      cluster: &Arc<Mutex<Cluster>>,
-  ) -> Result<(), ClusterExceptions> {
+    pub async fn process_requests(&mut self, message_execution_type: MessageExecutionType, cluster: &Arc<Mutex<Cluster>>) -> Result<(), ClusterExceptions> {
 
       loop {
           let message_request = cluster.lock().await.messenger.dequeue().await;
@@ -129,163 +126,175 @@ pub enum NodeRoleType {
             // Move the message response generation logic to Message
               match message.body() {
                   Some(message_type) => match *message_type {
-                      MessageType::Echo { .. } => {
-                          message_response = Message::Response {
-                              src: message.dest().unwrap().to_string(),
-                              dest: message.src().unwrap().to_string(),
-                              body: MessageType::EchoOk {
-                                  msg_id: message.body().unwrap().msg_id().unwrap(),
-                                  in_reply_to: message.body().unwrap().msg_id().unwrap(),
-                                  echo: message.body().unwrap().echo().unwrap().to_string(),
-                              },
-                          };
-                      },
-                      MessageType::Generate { .. } => {
-                          message_response = Message::Response {
-                              src: message.dest().unwrap().to_string(),
-                              dest: message.src().unwrap().to_string(),
-                              body: MessageType::GenerateOk {
-                                  msg_id: message.body().unwrap().msg_id().unwrap(),
-                                  in_reply_to: message.body().unwrap().msg_id().unwrap(),
-                                  id: self.generate_unique_id(),
-                              },
-                          };
-                      },
-                      MessageType::Broadcast { .. } => {
-                          let incoming_broadcast_msg =
-                              message.body().unwrap().broadcast_msg().unwrap();
-  
-                          {
-                              let mut memory_space = self.node_memory_space.clone();
-                              memory_space
-                                  .entry("broadcast_msgs".to_string())
-                                  .or_insert_with(Vec::new)
-                                  .push(incoming_broadcast_msg);
-                          }
-                          
-                          let other_nodes = self.other_node_ids.clone().into_iter().filter(|n| n != &self.node_id).collect::<Vec<String>>();
-                          
-                          for other_node in &other_nodes {
-
-                              let propagated_message = Message::Request {
-                                  src: self.node_id.clone(),
-                                  dest: other_node.clone(),
-                                  body: MessageType::Broadcast {
-                                      message: incoming_broadcast_msg.clone(),
-                                  },
-                              };
-
-                              let cluster_clone = Arc::clone(cluster);
-                              // Spawn an async task for each propagation
-                              let handle = tokio::spawn(async move {
-                                  if let Err(e) = cluster_clone.lock().await.propagate_message(propagated_message).await {
-                                      eprintln!("Propagation failed: {:?}", e);
-                                  }
-                              });
-          
-                              propagation_message_handles.push(handle);
-                          }
-
-                          message_response = Message::Response {
-                              src: message.dest().unwrap().to_string(),
-                              dest: message.src().unwrap().to_string(),
-                              body: MessageType::BroadcastOk {
-                                  msg_id: node_message_queue_ref,
-                                  in_reply_to: node_message_queue_ref,
-                              },
-                          };
-                      },
-                      MessageType::BroadcastRead { .. } => {
-                          let return_broadcast_msgs = {
-                              let memory_space = self.node_memory_space.clone();
-                              memory_space
-                                  .get(&"broadcast_msgs".to_string())
-                                  .cloned()
-                                  .unwrap_or_default()
-                          };
-  
-                          message_response = Message::Response {
-                              src: message.dest().unwrap().to_string(),
-                              dest: message.src().unwrap().to_string(),
-                              body: MessageType::BroadcastReadOk {
-                                  messages: return_broadcast_msgs,
-                              },
-                          };
-                      },
-                      MessageType::Topology { .. } => {
-                          let topology_update =
-                              message.body().unwrap().node_own_topology().unwrap();
-  
-                          if let Some(other_nodes) = topology_update.get(&self.node_id) {
-                              if !other_nodes.is_empty() {
-                                  self.other_node_ids = other_nodes.clone();
-                              }
-                          } else {
-                            cluster.lock().await.propagate_message(message.clone()).await?;
-                          }
-  
-                          message_response = Message::Response {
-                              src: message.dest().unwrap().to_string(),
-                              dest: message.src().unwrap().to_string(),
-                              body: MessageType::TopologyOk {},
-                          };
-                      },
-                      MessageType::VectorAdd { .. } => {
-
-                        // A VectorAdd is a global counter that needs to be consistent across nodes, eventually
-                        // Hence a VectorAdd request leads to 1) update on receiving node and 2) a series of follow up requests to update all other nodes so they are consistent
-                        if let Some(delta) = message.body().unwrap().delta() {
-                            
-                            if let None = self.get_dataframe(&"df_vector".to_string()) {
-                                let mut insert_data = HashMap::new();
-                                insert_data.insert("Counter".to_string(), delta.as_str());
-
-                                let df = DataFrame::new(Some(insert_data));
-                                self.insert_dataframe("df_vector".to_string(), df);
-                            }
-
-                            // Now build additional VectorAdd requests, exlcuding calling node
-                            let other_nodes = self.other_node_ids.clone().into_iter().filter(|n| n != &self.node_id).collect::<Vec<String>>();
-
-                            for other_node in other_nodes {
-
-                                let delta_request = Message::Request {
-                                    src: self.node_id,
-                                    dest: other_node,
-                                    body: MessageType::VectorAdd { 
-                                        delta: delta.clone()
-                                    }
-                                };
-
-                                cluster.lock().await.propagate_message(delta_request).await?;
-
-                            }
-
-                            message_response = Message::Response {
-                                src: message.dest().unwrap().to_string(),
-                                dest: message.src().unwrap().to_string(),
-                                body: MessageType::VectorAddOk {},
-                            };
+                    MessageType::Echo { .. } => {
+                        message_response = Message::Response {
+                            src: message.dest().unwrap().to_string(),
+                            dest: message.src().unwrap().to_string(),
+                            body: MessageType::EchoOk {
+                                msg_id: message.body().unwrap().msg_id().unwrap(),
+                                in_reply_to: message.body().unwrap().msg_id().unwrap(),
+                                echo: message.body().unwrap().echo().unwrap().to_string(),
+                            },
                         };
-                      },
-                      MessageType::VectorRead { .. } => {
+                    },
+                    MessageType::Generate { .. } => {
+                        message_response = Message::Response {
+                            src: message.dest().unwrap().to_string(),
+                            dest: message.src().unwrap().to_string(),
+                            body: MessageType::GenerateOk {
+                                msg_id: message.body().unwrap().msg_id().unwrap(),
+                                in_reply_to: message.body().unwrap().msg_id().unwrap(),
+                                id: self.generate_unique_id(),
+                            },
+                        };
+                    },
+                    MessageType::Broadcast { .. } => {
+                        let incoming_broadcast_msg =
+                            message.body().unwrap().broadcast_msg().unwrap();
+
+                        {
+                            let mut memory_space = self.node_memory_space.clone();
+                            memory_space
+                                .entry("broadcast_msgs".to_string())
+                                .or_insert_with(Vec::new)
+                                .push(incoming_broadcast_msg);
+                        }
+                        
+                        let other_nodes = self.other_node_ids.clone().into_iter().filter(|n| n != &self.node_id).collect::<Vec<String>>();
+                        
+                        for other_node in &other_nodes {
+
+                            let propagated_message = Message::Request {
+                                src: self.node_id.clone(),
+                                dest: other_node.clone(),
+                                body: MessageType::Broadcast {
+                                    message: incoming_broadcast_msg.clone(),
+                                },
+                            };
+
+                            let cluster_clone = Arc::clone(cluster);
+                            // Spawn an async task for each propagation
+                            let handle = tokio::spawn(async move {
+                                if let Err(e) = cluster_clone.lock().await.propagate_message(propagated_message).await {
+                                    eprintln!("Propagation failed: {:?}", e);
+                                }
+                            });
+        
+                            propagation_message_handles.push(handle);
+                        }
+
+                        message_response = Message::Response {
+                            src: message.dest().unwrap().to_string(),
+                            dest: message.src().unwrap().to_string(),
+                            body: MessageType::BroadcastOk {
+                                msg_id: node_message_queue_ref,
+                                in_reply_to: node_message_queue_ref,
+                            },
+                        };
+                    },
+                    MessageType::BroadcastRead { .. } => {
+                        let return_broadcast_msgs = {
+                            let memory_space = self.node_memory_space.clone();
+                            memory_space
+                                .get(&"broadcast_msgs".to_string())
+                                .cloned()
+                                .unwrap_or_default()
+                        };
+
+                        message_response = Message::Response {
+                            src: message.dest().unwrap().to_string(),
+                            dest: message.src().unwrap().to_string(),
+                            body: MessageType::BroadcastReadOk {
+                                messages: return_broadcast_msgs,
+                            },
+                        };
+                    },
+                    MessageType::Topology { .. } => {
+                        let topology_update =
+                            message.body().unwrap().node_own_topology().unwrap();
+
+                        if let Some(other_nodes) = topology_update.get(&self.node_id) {
+                            if !other_nodes.is_empty() {
+                                self.other_node_ids = other_nodes.clone();
+                            }
+                        } else {
+                        cluster.lock().await.propagate_message(message.clone()).await?;
+                        }
+
+                        message_response = Message::Response {
+                            src: message.dest().unwrap().to_string(),
+                            dest: message.src().unwrap().to_string(),
+                            body: MessageType::TopologyOk {},
+                        };
+                    },
+                    MessageType::VectorAdd { .. } => {
+
+                    // A VectorAdd is a global counter that needs to be consistent across nodes, eventually
+                    // Hence a VectorAdd request leads to 1) update on receiving node and 2) a series of follow up requests to update all other nodes so they are consistent
+                    if let Some(delta) = message.body().unwrap().delta() {
+                        
+                        if let None = self.get_dataframe(&"df_vector".to_string()) {
+                            let mut insert_data = HashMap::new();
+                            insert_data.insert("Counter".to_string(), delta.as_str());
+
+                            let df = DataFrame::new(Some(insert_data));
+                            self.insert_dataframe("df_vector".to_string(), df);
+                        }
+
+                        // Now build additional VectorAdd requests, exlcuding calling node
+                        let other_nodes = self.other_node_ids.clone().into_iter().filter(|n| n != &self.node_id).collect::<Vec<String>>();
+
+                        for other_node in other_nodes {
+
+                            let delta_request = Message::Request {
+                                src: self.node_id.clone(),
+                                dest: other_node,
+                                body: MessageType::VectorAdd { 
+                                    delta: delta.clone()
+                                }
+                            };
+
+                            cluster.lock().await.propagate_message(delta_request).await?;
+
+                        }
+
+                        message_response = Message::Response {
+                            src: message.dest().unwrap().to_string(),
+                            dest: message.src().unwrap().to_string(),
+                            body: MessageType::VectorAddOk {},
+                        };
+                        
+                    } else {
+                        return Err(ClusterExceptions::InvalidClusterRequest {
+                        error_message_1: message.clone(),
+                        error_message_2: self.node_id.clone(),
+                        });
+                    };
+                    },
+                    MessageType::VectorRead { .. } => {
 
                         let df = self.get_dataframe_mut(&"df_vector".to_string());
 
                         if let Some(df) = df {
                             if let Some(global_counter) = df.sum("Counter".to_string()) {
-  
-                            message_response = Message::Response {
-                                src: message.dest().unwrap().to_string(),
-                                dest: message.src().unwrap().to_string(),
-                                body: MessageType::VectorReadOk { 
-                                    value: global_counter.to_string()
-                                },
-                            };
+
+                                message_response = Message::Response {
+                                    src: message.dest().unwrap().to_string(),
+                                    dest: message.src().unwrap().to_string(),
+                                    body: MessageType::VectorReadOk { 
+                                        value: global_counter.to_string()
+                                    },
+                                };
+
+                            } else {
+                                return Err(ClusterExceptions::DatastoreError(DatastoreExceptions::FailedToRetrieveData { error_message: format!("Action: sum | Column: Counter") } ));
                             }
+
+                        } else {
+                            return Err(ClusterExceptions::DatastoreError(DatastoreExceptions::DfDoesNotExist { error_message: "df_vector".to_string() } ));
                         }
-                      },
-                      MessageType::Send { .. } => {
+                    },
+                    MessageType::Send { .. } => {
                         // TODO
                         // Here we are explicity tying usize type to KeyValue method
                         if let Some(key) = message.body().unwrap().kv_key() {
@@ -423,31 +432,52 @@ pub enum NodeRoleType {
                         }
                     },
                     MessageType::ReadFromFile { .. } => {
+                        let file_path = message.body().unwrap().file_system_path().unwrap();
+                        let _file_accessibility = message.body().unwrap().file_system_type().unwrap();
+                        let file_bytes = message.body().unwrap().file_system_bytes().unwrap();
+                        let _file_schema = message.body().unwrap().file_system_schema().unwrap();
 
-                        if let Some(dataframe) = self.get_kv_store::<String>().await {
-
-                            if let Some(msg_offsets) = message.body().unwrap().offsets() {
-
-                                if let Some(return_offsets) = kv_log_store.get_offsets(msg_offsets.clone()) {
+                        // TODO
+                        // Hardcoding the client request df name as "df" for now
+                        match self.get_dataframe(&"df".to_string()) {
+                            Some(df) => {
+                                    return Err(ClusterExceptions::DatastoreError(DatastoreExceptions::DfAlreadyExists { error_message: file_path.clone() }));
+                            },
+                            None => {
+                                if let Ok(df) = file_system::read_csv(file_path.clone(), file_bytes.clone()) {
+                                    self.insert_dataframe("df".to_string(), df);
 
                                     message_response = Message::Response {
                                         src: message.dest().unwrap().to_string(),
                                         dest: message.src().unwrap().to_string(),
-                                        body: MessageType::PollOk {
-                                            msgs: return_offsets
+                                        body: MessageType::ReadFromFileOk {
                                         }
                                     };
-                                }
-                                else {
-                                    return Err(ClusterExceptions::MessageError(MessageExceptions::PollOffsetsError));
+                                } else {
+                                    return Err(ClusterExceptions::DatastoreError(DatastoreExceptions::FailedToSaveDf { error_message: self.node_id.clone() } ));
                                 }
                             }
-                            else {
-                                return Err(ClusterExceptions::MessageError(MessageExceptions::PollOffsetsError));
-                            }
-                        } else {
-                            return Err(ClusterExceptions::MessageError(MessageExceptions::PollOffsetsError));
                         }
+                    },
+                    MessageType::DisplayDf { .. } => {
+
+                        let df_name = message.body().unwrap().df_name().unwrap();
+                        let n_rows = message.body().unwrap().display_rows().unwrap();
+
+                        if let Some(df) = self.get_dataframe(df_name) {
+                            df.print_table(Some(n_rows));
+
+                            message_response = Message::Response {
+                                src: message.dest().unwrap().to_string(),
+                                dest: message.src().unwrap().to_string(),
+                                body: MessageType::DisplayDfOk {
+                                }
+                            };
+
+                        } else {
+                            return Err(ClusterExceptions::DatastoreError(DatastoreExceptions::DfDoesNotExist { error_message: df_name.clone() } ));
+                        }
+
                     },
                     _ => { 
                         return Err(ClusterExceptions::UnkownClientRequest {
@@ -456,7 +486,7 @@ pub enum NodeRoleType {
                     }
                   },
                   None => panic!("Request type does not exist!"),
-              }
+                }
   
               {
                   let mut message_record = self.message_record.lock().await;
@@ -476,12 +506,11 @@ pub enum NodeRoleType {
                 }
               }
 
-          } else {
-              tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-          }
-      }
-    }  
-  
+            } else {
+                tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+            }
+        }  
+    }
 
     pub fn generate_unique_id(&self) -> String {
       // Extract numeric part from the input string
