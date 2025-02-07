@@ -16,11 +16,9 @@ async fn main() {
   let message_execution_target = MessageExecutionType::StdOut;
   let (tx, rx) = mpsc::channel::<String>(100);
 
-  let (semantic_tx, semantic_rx) = mpsc::channel::<String>(100);
-
   let cluster: Cluster = Cluster::create(1, rx, message_execution_target, source_path);
  
-  let mut session = Session::new(cluster, implementation, semantic_rx, tx.clone());
+  let mut session = Session::new(cluster, implementation, tx.clone());
   
   tokio::spawn(async move {
     session.session_execution().await;
@@ -32,19 +30,15 @@ async fn main() {
 
     match io::stdin().read_line(&mut std_input) {
       Ok(_line) => {
-        
-        let (request, _other_param) = std_input.as_str().split_once(" ").unwrap();
+        let request = std_input.trim();
 
         // If next STDIN message is exit, break from loop and return from session
         match request {
           "exit" => {
             break;
           },
-          "read-file" => {
-            semantic_tx.send(std_input);
-          },
           _ => {
-            tx.send(std_input).await;
+            tx.send(request.to_string()).await;
           }
         }
 

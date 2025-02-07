@@ -1,5 +1,6 @@
 use crate::session_resources::message::{Message, MessageType, MessageFields, MessageStatus};
 use std::collections::{HashMap, BTreeMap};
+use std::str::ParseBoolError;
 use crate::session_resources::node::Node;
 use crate::session_resources::implementation::MessageExecutionType;
 use crate::session_resources::message::message_serializer;
@@ -153,6 +154,7 @@ pub struct Cluster {
     pub async fn categorize_and_queue(&mut self, incoming_message: String) -> Result<(), ClusterExceptions> {
       let mut message_error: Option<MessageStatus> = None;
 
+      let incoming_message = self.map_request(incoming_message)?;
       let message_request = self.messenger.categorize(incoming_message).await?;
       let message_id = self.insert_message_log(message_request.clone())?;
 
@@ -318,111 +320,111 @@ pub struct Cluster {
       Ok(())
     }
 
-      pub fn remove(mut self, node: Node) -> Result<(), ClusterExceptions> {
+    pub fn remove(mut self, node: Node) -> Result<(), ClusterExceptions> {
 
-        let node_removal = self.nodes.remove(&node.node_id);
+    let node_removal = self.nodes.remove(&node.node_id);
 
-        match node_removal {
-          Some(_node_removal) => {
-            println!("{} has been disconnected from {}", node.node_id, self.cluster_id);
-          },
-          None => {
-            return Err(ClusterExceptions::FailedToRemoveNodeFromCluster { error_message: node.node_id } );
-          }
+    match node_removal {
+      Some(_node_removal) => {
+        println!("{} has been disconnected from {}", node.node_id, self.cluster_id);
+      },
+      None => {
+        return Err(ClusterExceptions::FailedToRemoveNodeFromCluster { error_message: node.node_id } );
+      }
+    }
+    Ok(())
+    }
+
+    pub fn terminate(mut self) -> Result<(), ClusterExceptions> {
+    let node_count = self.nodes.is_empty();
+
+    match node_count {
+      true => Err(ClusterExceptions::ClusterDoesNotHaveAnyNodes { error_message: self.cluster_id } ),
+      false => {
+        for key in &self.get_nodes() {
+          println!("Removing {} from {}", key, self.cluster_id);
+          self.nodes.remove(&key.clone());
         }
+        println!("All nodes removed from {:?}", self.cluster_id);
+        drop(self);
         Ok(())
       }
+    }
+    }
 
-      pub fn terminate(mut self) -> Result<(), ClusterExceptions> {
-        let node_count = self.nodes.is_empty();
+    pub fn get_nodes(&self) -> Vec<String> {
+    self.nodes.keys().cloned().collect()
+    }
 
-        match node_count {
-          true => Err(ClusterExceptions::ClusterDoesNotHaveAnyNodes { error_message: self.cluster_id } ),
-          false => {
-            for key in &self.get_nodes() {
-              println!("Removing {} from {}", key, self.cluster_id);
-              self.nodes.remove(&key.clone());
-            }
-            println!("All nodes removed from {:?}", self.cluster_id);
-            drop(self);
-            Ok(())
-          }
+    pub fn count_nodes(&self) -> usize {
+    self.nodes.len()
+    }
+
+    pub fn get_node_metadata(&self, node: String) -> Result<&Node, ClusterExceptions> {
+
+    let node_fetch = self.nodes.get(&node);
+
+    if let Some(node_metadata) = node_fetch {
+      Ok(node_metadata)
+    }
+    else {
+      Err(ClusterExceptions::NodeDoesNotExist { error_message: node.clone() })
+    }
+
+    }
+
+    pub fn read_data_from_file(&mut self, file_path: String) -> Result<String, ClusterExceptions> {
+
+    // Receive read request message
+    // File path retrieved from request
+    // Nodes are retrieved from cluster
+    // File path is added to file manager record
+    // Byte ordinals are generated for file based on nodes
+    // Transaction message is created that has a read request for each node with ordinal positions
+    // Depending on the FileSystemType, read is either receive bytes from home client and write to local file
+    // or, read existing file on distributed file share
+    // Read transaction completed or failed
+
+    // Get nodes
+    let nodes = self.get_nodes();
+
+    // Inserts hash of file path into FileSystemManager
+    if let Ok(file_path_hash) = self.file_system_manager.read_from_file(file_path.clone(), &nodes) {
+
+      // Open new transaction
+      if let Some(ref mut transaction) = Message::default_request_message(MessageType::Transaction { txn: vec![] } ) {
+        transaction.set_src("cluster-orch".to_string());
+
+        // TODO
+        // This will pull Node from first element in vector which is not guaranteed to be n1
+        // nodes can also be empty
+        transaction.set_dest(nodes[0].clone());
+
+        let file_system_type = self.cluster_configuration.working_directory.file_system_type.clone();
+
+        let infered_file_schema = FileSystemManager::get_file_header(file_path.clone())?;
+        let infered_file_schema_string = serde_json::to_string(&infered_file_schema)?;
+        let byte_ordinals = FileSystemManager::get_byte_ordinals(file_path.clone(), &nodes)?;
+        let byte_ordinals_string = serde_json::to_string(&byte_ordinals)?;
+
+        if let Some(file_object) = self.file_system_manager.files.get(&file_path_hash) {
+          transaction.set_body(MessageType::Transaction { txn: vec![vec!["rf".to_string(), file_path.clone(), file_system_type.to_string(), byte_ordinals_string, infered_file_schema_string]] });
+        } else {
+          return Err(ClusterExceptions::UnkownClientRequest { error_message: file_path });
         }
-      }
 
-      pub fn get_nodes(&self) -> Vec<String> {
-        self.nodes.keys().cloned().collect()
-      }
-
-      pub fn count_nodes(&self) -> usize {
-        self.nodes.len()
-      }
-
-      pub fn get_node_metadata(&self, node: String) -> Result<&Node, ClusterExceptions> {
-
-        let node_fetch = self.nodes.get(&node);
-
-        if let Some(node_metadata) = node_fetch {
-          Ok(node_metadata)
-        }
-        else {
-          Err(ClusterExceptions::NodeDoesNotExist { error_message: node.clone() })
+        if let Ok(request_string) = message_serializer(&transaction) {
+          return Ok(request_string);
+        } else {
+          return Err(ClusterExceptions::UnkownClientRequest { error_message: file_path });
         }
 
-      }
-
-      pub fn read_data_from_file(&mut self, file_path: String) -> Result<String, ClusterExceptions> {
-
-        // Receive read request message
-        // File path retrieved from request
-        // Nodes are retrieved from cluster
-        // File path is added to file manager record
-        // Byte ordinals are generated for file based on nodes
-        // Transaction message is created that has a read request for each node with ordinal positions
-        // Depending on the FileSystemType, read is either receive bytes from home client and write to local file
-        // or, read existing file on distributed file share
-        // Read transaction completed or failed
-
-        // Get nodes
-        let nodes = self.get_nodes();
-
-        // Inserts hash of file path into FileSystemManager
-        if let Ok(file_path_hash) = self.file_system_manager.read_from_file(file_path.clone(), &nodes) {
-
-          // Open new transaction
-          if let Some(ref mut transaction) = Message::default_request_message(MessageType::Transaction { txn: vec![] } ) {
-            transaction.set_src("cluster-orch".to_string());
-
-            // TODO
-            // This will pull Node from first element in vector which is not guaranteed to be n1
-            // nodes can also be empty
-            transaction.set_dest(nodes[0].clone());
-
-            let file_system_type = self.cluster_configuration.working_directory.file_system_type.clone();
-
-            let infered_file_schema = FileSystemManager::get_file_header(file_path.clone())?;
-            let infered_file_schema_string = serde_json::to_string(&infered_file_schema)?;
-            let byte_ordinals = FileSystemManager::get_byte_ordinals(file_path.clone(), &nodes)?;
-            let byte_ordinals_string = serde_json::to_string(&byte_ordinals)?;
-
-            if let Some(file_object) = self.file_system_manager.files.get(&file_path_hash) {
-              transaction.set_body(MessageType::Transaction { txn: vec![vec!["rf".to_string(), file_path.clone(), file_system_type.to_string(), byte_ordinals_string, infered_file_schema_string]] });
-            } else {
-              return Err(ClusterExceptions::UnkownClientRequest { error_message: file_path });
-            }
-
-            if let Ok(request_string) = message_serializer(&transaction) {
-              return Ok(request_string);
-            } else {
-              return Err(ClusterExceptions::UnkownClientRequest { error_message: file_path });
-            }
-
-          } else {
-            return Err(ClusterExceptions::UnkownClientRequest { error_message: file_path });
-          }
       } else {
         return Err(ClusterExceptions::UnkownClientRequest { error_message: file_path });
       }
+    } else {
+    return Err(ClusterExceptions::UnkownClientRequest { error_message: file_path });
+    }
 
     }
 
@@ -439,18 +441,44 @@ pub struct Cluster {
     // TODO
     // Move this to transaction to cater for multiple node displays without having to handle multiple display requests at the session/cluster level
     let message_request = Message::Request { 
-          src: "cluster-orch".to_string(), 
-          dest: nodes[0].to_string(), 
-          body: MessageType::DisplayDf { 
-            df_name: df_name, 
-            total_rows: 5
-          } 
-        };
+      src: "cluster-orch".to_string(), 
+      dest: nodes[0].to_string(), 
+      body: MessageType::DisplayDf { 
+        df_name: df_name, 
+        total_rows: 5
+      } 
+    };
 
-    
+
     return Ok(message_serializer(&message_request)?);
 
 
-  }
+    }
+
+    pub fn map_request(&mut self, request: String) -> Result<String, ClusterExceptions> {
+
+    let known_actions = vec!["-a", "-fp"];
+
+    let request_params = request.as_str().split("-").map(|str| str.to_string()).collect::<Vec<String>>();
+
+    // let (action, param) = request_params.split_once(" ").trim().collect::<(String, String)>();
+
+    match request.as_str() {
+    "read_file" => {
+      // TODO
+      // Need to accept df name when read request received
+        let request_string = self.read_data_from_file("hardocde path".to_string())?;
+        return Ok(request_string);
+    },
+    "display-df" => {
+      let request_string = self.display_df("df".to_string())?;
+      return Ok(request_string);
+    }
+    _ => {
+        return Ok(request);
+    }
+    }
+
+    }
 
 }

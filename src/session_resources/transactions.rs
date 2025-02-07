@@ -438,7 +438,7 @@ impl TransactionManager {
                     transaction_manager.commit_transaction(transaction_id).await.ok();
                 }
                 WalEntry::TransactionAbort { transaction_id } => {
-                    transaction_manager.abort_transaction(transaction_id);
+                    transaction_manager.abort_transaction(transaction_id).await;
                 }
             }
         }

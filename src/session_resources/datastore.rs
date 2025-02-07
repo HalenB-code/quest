@@ -198,7 +198,7 @@ impl DataFrame {
                         if let Some(existing_offsets) = filtered_data[0].get(&"Status".to_string()) {
                             let offset_elements = existing_offsets.split(",").map(|element| element.parse::<usize>().unwrap()).collect::<Vec<usize>>();
 
-                            offset_elements.iter().enumerate().map(|(_element, index)| if index <= &offset { 1 } else {0} );
+                            let offset_elements = offset_elements.iter().enumerate().map(|(_element, index)| if index <= &offset { 1 } else {0} ).collect();
 
                             if let Some(column_mut) = self.columns.get_mut(&"Key".to_string()) {
                                 column_mut.overwrite(offset_elements, column_index_position_to_update[0]);
