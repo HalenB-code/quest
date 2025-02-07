@@ -48,7 +48,7 @@ impl Session {
         
         while let Some(user_request) = rx.recv().await {
           if let Ok(internal_request) = self.map_user_request(user_request) {
-            self.sending_channel.send(internal_request);
+            self.sending_channel.send(internal_request).await;
           }
         }
 
@@ -59,7 +59,7 @@ impl Session {
             {}
           },
           Err(error) => {
-            eprintln!("Cluster error: {error}");
+            eprintln!("ERROR: {error}");
           }
         }
 

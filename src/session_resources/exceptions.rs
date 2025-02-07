@@ -27,6 +27,7 @@ pub enum ClusterExceptions {
     ConfigError(TransactionExceptions),
     FileSystemError(FileSystemExceptions),
     DatastoreError(DatastoreExceptions),
+    MessageStatusNotUpdated { error_message: String },
     // Add other error types here
 }
 
@@ -106,6 +107,9 @@ impl fmt::Display for ClusterExceptions {
             },
             ClusterExceptions::DatastoreError(error_message) => {
                 write!(f, "Datastore Error occurred: '{}'", error_message)
+            },
+            ClusterExceptions::MessageStatusNotUpdated { error_message } => {
+                write!(f, "Message '{}' status could not be updated.", error_message)
             },
         }
     }

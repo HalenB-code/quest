@@ -560,6 +560,23 @@ impl fmt::Display for MessageExceptions {
     }
 }
 
+#[derive(Debug, Clone)]
+pub enum MessageStatus {
+    Pending,
+    Failed,
+    Ok
+}
+
+impl fmt::Display for MessageStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            MessageStatus::Pending { .. } => write!(f, "pending"),
+            MessageStatus::Failed { .. } => write!(f, "fail"),
+            MessageStatus::Ok { .. } => write!(f, "ok"),
+        }
+    }
+}
+
 impl Message {
     pub fn default_request_message(message_type: MessageType) -> Option<Self> {
         match message_type {

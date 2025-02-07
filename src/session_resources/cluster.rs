@@ -1,18 +1,16 @@
-use crate::session_resources::message::{Message, MessageType, MessageFields, MessageTypeFields};
+use crate::session_resources::message::{Message, MessageType, MessageFields, MessageStatus};
 use std::collections::{HashMap, BTreeMap};
 use crate::session_resources::node::Node;
 use crate::session_resources::implementation::MessageExecutionType;
 use crate::session_resources::message::message_serializer;
 use crate::session_resources::messenger::Messenger;
 use crate::session_resources::exceptions::ClusterExceptions;
-use crate::session_resources::warnings::ClusterWarnings;
 use crate::session_resources::config::ClusterConfig;
 use crate::session_resources::transactions::{TransactionManager, TransactionExceptions};
 use crate::session_resources::file_system::FileSystemManager;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 use std::fmt::Debug;
-use std::hash::Hash;
 
 // const WAL_PATH: &str = r"C:\rust\projects\rust-bdc";
 
@@ -56,10 +54,44 @@ pub struct Cluster {
       }
     }
 
-    pub async fn process_initialization(
-      &mut self,
-      init_request_message: Message
-    ) -> Result<(), ClusterExceptions> {
+    pub fn insert_message_log(&mut self, message: Message) -> Result<usize, ClusterExceptions> {
+      
+      let message_id = self.node_message_log.keys().max().unwrap_or(&0_usize) + 1;
+
+      // Insert message in log as pending
+      self.node_message_log.insert(message_id, (message.clone(), MessageStatus::Pending.to_string()));
+
+      Ok(message_id)
+    }
+
+    pub fn update_message_log(&mut self, message_id: usize, message_status: MessageStatus) -> Result<(), ClusterExceptions> {
+      
+      match message_status {
+        MessageStatus::Ok => {
+          self.node_message_log
+          .entry(message_id)
+          .and_modify(|(_key, value)| {
+            *value = MessageStatus::Ok.to_string();
+          });
+        },
+        MessageStatus::Failed => {
+          self.node_message_log
+          .entry(message_id)
+          .and_modify(|(_key, value)| {
+            *value = MessageStatus::Failed.to_string();
+          });
+        }
+        _ => {
+          return Err(ClusterExceptions::MessageStatusNotUpdated {
+            error_message: message_id.to_string(),
+          })
+        }
+      }
+
+      Ok(())
+    }
+
+    pub async fn process_initialization(&mut self, init_request_message: Message) -> Result<(), ClusterExceptions> {
 
       let node_exists = self.nodes.contains_key(init_request_message.node_id().unwrap());
 
@@ -73,9 +105,6 @@ pub struct Cluster {
               self.nodes
                   .entry(node_id.clone())
                   .or_insert(node.clone());
-
-              self.node_message_log
-                  .insert(nodes_id_ref, (init_request_message.clone(), "ok".to_string()));
   
               let node_check = self.nodes.contains_key(init_request_message.node_id().unwrap());
               
@@ -121,269 +150,283 @@ pub struct Cluster {
     Ok(())
   }
   
-  pub async fn categorize_and_queue(&mut self, incoming_message: String) -> Result<(), ClusterExceptions> {
+    pub async fn categorize_and_queue(&mut self, incoming_message: String) -> Result<(), ClusterExceptions> {
+      let mut message_error: Option<MessageStatus> = None;
 
-    let message_request = self.messenger.categorize(incoming_message).await?;
+      let message_request = self.messenger.categorize(incoming_message).await?;
+      let message_id = self.insert_message_log(message_request.clone())?;
+
+      match message_request {
+        Message::Init { .. } => {
+            if let Err(_error) = self.process_initialization(message_request).await {
+              message_error = Some(MessageStatus::Failed);
+            } else {
+              message_error = Some(MessageStatus::Ok);
+            };
+        },
+        Message::Request { .. } => {
+          match message_request.msg_type().unwrap().as_str() {
+            "txn" => {
+              if let Err(_error) = self.categorize_and_queue_transactions(message_request).await {
+                message_error = Some(MessageStatus::Failed);
+              } else {
+                message_error = Some(MessageStatus::Ok);
+              };
+            },
+            _ => {
+              if let Err(_error) = self.messenger.request_queue(message_request).await {
+                message_error = Some(MessageStatus::Failed);
+              } else {
+                message_error = Some(MessageStatus::Ok);
+              };
+            }
+
+          }
+        },
+        Message::Response { .. } => {
+          return Err(ClusterExceptions::UnkownClientRequest {
+            error_message: message_request.dest().unwrap().to_string(),
+          });
+        }
+      }
+
+      if message_error.is_none() {
+        self.update_message_log(message_id, MessageStatus::Ok)?;
+      } else {
+        self.update_message_log(message_id, MessageStatus::Failed)?;
+      }
+
+      Ok(())
+  }
+
+    async fn complete_transaction(&mut self, message_request: Message) -> Result<(), ClusterExceptions> {
+
+    let node_metadata = self.get_node_metadata(message_request.dest().unwrap().clone())?;
+    let node_topology = node_metadata.other_node_ids.clone();
+
+    let transaction_id = self.transaction_manager.start_transaction(message_request.clone(), node_topology).await?;
+    let transaction_actions = self.transaction_manager.execute_transaction(message_request.dest().unwrap().clone(), transaction_id).await?;
+
+    let mut transaction_execution_error = None;
+
+    for action in transaction_actions {
+
+      if let Some(transaction_message_request) = action.value {
+        if let Err(_error) = self.messenger.request_queue(transaction_message_request).await {
+          transaction_execution_error = Some(())
+        }
+      }
+    };
+
+    if let None = transaction_execution_error {
+      self.transaction_manager.commit_transaction(transaction_id).await?;
+      Ok(())
+    } else {
+      return Err(ClusterExceptions::TransactionError(TransactionExceptions::FailedToCommitTransaction { error_message: transaction_id.to_string() }));
+    }
+
+    // self.abort
+    // self.roll_back
+    // self.recover
+
+    }
+
+    pub async fn categorize_and_queue_transactions(&mut self, txn_message: Message) -> Result<(), ClusterExceptions> {
 
     // TODO Assign msg_id based on global log and set status to out
 
-    match message_request {
-      Message::Init { .. } => {
-          self.process_initialization(message_request).await?;
-      },
-      Message::Request { .. } => {
-        match message_request.msg_type().unwrap().as_str() {
-          "txn" => {
-            self.categorize_and_queue_transactions(message_request).await?;
-          },
-          _ => {
-            self.messenger.request_queue(message_request).await?;
-          }
+    self.complete_transaction(txn_message).await?;
 
-        }
-      },
-      Message::Response { .. } => {
-        return Err(ClusterExceptions::UnkownClientRequest {
-          error_message: message_request.dest().unwrap().to_string(),
-        });
-      }
-    }
-
-
-    
     // TODO If no error comes back, set status to ok in global log
 
     Ok(())
-}
-
-async fn complete_transaction(&mut self, message_request: Message) -> Result<(), ClusterExceptions> {
-
-  let node_metadata = self.get_node_metadata(message_request.dest().unwrap().clone())?;
-  let node_topology = node_metadata.other_node_ids.clone();
-
-  let transaction_id = self.transaction_manager.start_transaction(message_request.clone(), node_topology).await?;
-  let transaction_actions = self.transaction_manager.execute_transaction(message_request.dest().unwrap().clone(), transaction_id).await?;
-
-  let mut transaction_execution_error = None;
-
-  for action in transaction_actions {
-
-    if let Some(transaction_message_request) = action.value {
-      if let Err(_error) = self.messenger.request_queue(transaction_message_request).await {
-        transaction_execution_error = Some(())
-      }
     }
-  };
 
-  if let None = transaction_execution_error {
-    self.transaction_manager.commit_transaction(transaction_id).await?;
+    pub async fn propagate_message(&mut self, message: Message) -> Result<(), ClusterExceptions> {
+
+    if let Some(requeue_node_id) = message.dest() {
+
+      match &self.nodes.contains_key(requeue_node_id) {
+        true => {
+          self.messenger.request_queue(message.clone()).await?;
+        },
+        false => {
+          let init_message = self.messenger.categorize(format!(r#"{{"type":"init","msg_id":1,"node_id":"{requeue_node_id}","node_ids":[]}}"#)).await?;
+          self.messenger.response_queue(init_message).await?;
+          self.messenger.response_queue(message.clone()).await?;
+          // println!("In propagate {:?}", &self.messenger.message_responses.lock().await);
+          ()
+        }
+        
+      }
+
+    } else {
+        // If the node does not exist, return an error
+        return Err(ClusterExceptions::NodeDoesNotExist {
+            error_message: format!("{:?}", message),
+        });
+    }
+
     Ok(())
-  } else {
-    return Err(ClusterExceptions::TransactionError(TransactionExceptions::FailedToCommitTransaction { error_message: transaction_id.to_string() }));
-  }
-
-  // self.abort
-  // self.roll_back
-  // self.recover
-
-}
-
-pub async fn categorize_and_queue_transactions(&mut self, txn_message: Message) -> Result<(), ClusterExceptions> {
-
-  // TODO Assign msg_id based on global log and set status to out
-
-  self.complete_transaction(txn_message).await?;
-
-  // TODO If no error comes back, set status to ok in global log
-
-  Ok(())
-}
-
-pub async fn propagate_message(&mut self, message: Message) -> Result<(), ClusterExceptions> {
-
-  if let Some(requeue_node_id) = message.dest() {
-
-    match &self.nodes.contains_key(requeue_node_id) {
-      true => {
-        self.messenger.request_queue(message.clone()).await?;
-      },
-      false => {
-        let init_message = self.messenger.categorize(format!(r#"{{"type":"init","msg_id":1,"node_id":"{requeue_node_id}","node_ids":[]}}"#)).await?;
-        self.messenger.response_queue(init_message).await?;
-        self.messenger.response_queue(message.clone()).await?;
-        // println!("In propagate {:?}", &self.messenger.message_responses.lock().await);
-        ()
-      }
-      
     }
 
-  } else {
-      // If the node does not exist, return an error
-      return Err(ClusterExceptions::NodeDoesNotExist {
-          error_message: format!("{:?}", message),
-      });
-  }
+    pub async fn process_followups(&mut self) -> Result<(), ClusterExceptions> {
 
-  Ok(())
-}
+      let response_queue_check = self.messenger.message_responses.lock().await.is_empty();
+      // println!("In the request response section {:?}", &self.messenger.message_responses.lock().await);
 
-  pub async fn process_followups(&mut self) -> Result<(), ClusterExceptions> {
-
-    let response_queue_check = self.messenger.message_responses.lock().await.is_empty();
-    // println!("In the request response section {:?}", &self.messenger.message_responses.lock().await);
-
-    if !response_queue_check {
-      
-      let cluster_clone = self.clone();
-      let mut messenger_request_queue_lock = cluster_clone.messenger.message_responses.lock().await;
-      while let Some(response_request) = messenger_request_queue_lock.pop_front() {
-        match response_request {
-          Message::Init { .. } => {
-              self.process_initialization(response_request).await?;
-          },
-          Message::Request { .. } => {
-            self.messenger.request_queue(response_request).await?;
-          },
-          Message::Response { .. } => {
-            return Err(ClusterExceptions::UnkownClientRequest {
-              error_message: response_request.dest().unwrap().to_string(),
-            });
+      if !response_queue_check {
+        
+        let cluster_clone = self.clone();
+        let mut messenger_request_queue_lock = cluster_clone.messenger.message_responses.lock().await;
+        while let Some(response_request) = messenger_request_queue_lock.pop_front() {
+          match response_request {
+            Message::Init { .. } => {
+                self.process_initialization(response_request).await?;
+            },
+            Message::Request { .. } => {
+              self.messenger.request_queue(response_request).await?;
+            },
+            Message::Response { .. } => {
+              return Err(ClusterExceptions::UnkownClientRequest {
+                error_message: response_request.dest().unwrap().to_string(),
+              });
+            }
           }
         }
       }
-    }
 
-    Ok(())
-
-  }
-
-  pub async fn run(&mut self) -> Result<(), ClusterExceptions> {
-    
-    // Clone the Arc for the receiving channel
-    let receiver_clone = Arc::clone(&self.receiving_channel);
-
-    // Lock the receiver (this avoids the temporary value issue)
-    let mut rx = receiver_clone.lock().await;
-    
-    while let Some(incoming_message) = rx.recv().await {
-
-        // println!("{:?}", &message_request);
-        self.categorize_and_queue(incoming_message).await?;
-        self.process_followups().await?
+      Ok(())
 
     }
-    Ok(())
-  }
-  
-    pub fn remove(mut self, node: Node) -> Result<(), ClusterExceptions> {
-  
-      let node_removal = self.nodes.remove(&node.node_id);
-  
-      match node_removal {
-        Some(_node_removal) => {
-          println!("{} has been disconnected from {}", node.node_id, self.cluster_id);
-        },
-        None => {
-          return Err(ClusterExceptions::FailedToRemoveNodeFromCluster { error_message: node.node_id } );
-        }
+
+    pub async fn run(&mut self) -> Result<(), ClusterExceptions> {
+      
+      // Clone the Arc for the receiving channel
+      let receiver_clone = Arc::clone(&self.receiving_channel);
+
+      // Lock the receiver (this avoids the temporary value issue)
+      let mut rx = receiver_clone.lock().await;
+      
+      while let Some(incoming_message) = rx.recv().await {
+
+          // println!("{:?}", &message_request);
+          self.categorize_and_queue(incoming_message).await?;
+          self.process_followups().await?
+
       }
       Ok(())
     }
-  
-    pub fn terminate(mut self) -> Result<(), ClusterExceptions> {
-      let node_count = self.nodes.is_empty();
-  
-      match node_count {
-        true => Err(ClusterExceptions::ClusterDoesNotHaveAnyNodes { error_message: self.cluster_id } ),
-        false => {
-          for key in &self.get_nodes() {
-            println!("Removing {} from {}", key, self.cluster_id);
-            self.nodes.remove(&key.clone());
+
+      pub fn remove(mut self, node: Node) -> Result<(), ClusterExceptions> {
+
+        let node_removal = self.nodes.remove(&node.node_id);
+
+        match node_removal {
+          Some(_node_removal) => {
+            println!("{} has been disconnected from {}", node.node_id, self.cluster_id);
+          },
+          None => {
+            return Err(ClusterExceptions::FailedToRemoveNodeFromCluster { error_message: node.node_id } );
           }
-          println!("All nodes removed from {:?}", self.cluster_id);
-          drop(self);
-          Ok(())
+        }
+        Ok(())
+      }
+
+      pub fn terminate(mut self) -> Result<(), ClusterExceptions> {
+        let node_count = self.nodes.is_empty();
+
+        match node_count {
+          true => Err(ClusterExceptions::ClusterDoesNotHaveAnyNodes { error_message: self.cluster_id } ),
+          false => {
+            for key in &self.get_nodes() {
+              println!("Removing {} from {}", key, self.cluster_id);
+              self.nodes.remove(&key.clone());
+            }
+            println!("All nodes removed from {:?}", self.cluster_id);
+            drop(self);
+            Ok(())
+          }
         }
       }
-    }
-  
-    pub fn get_nodes(&self) -> Vec<String> {
-      self.nodes.keys().cloned().collect()
-    }
-  
-    pub fn count_nodes(&self) -> usize {
-      self.nodes.len()
-    }
 
-    pub fn get_node_metadata(&self, node: String) -> Result<&Node, ClusterExceptions> {
-
-      let node_fetch = self.nodes.get(&node);
-
-      if let Some(node_metadata) = node_fetch {
-        Ok(node_metadata)
-      }
-      else {
-        Err(ClusterExceptions::NodeDoesNotExist { error_message: node.clone() })
+      pub fn get_nodes(&self) -> Vec<String> {
+        self.nodes.keys().cloned().collect()
       }
 
-    }
-  
-    pub fn read_data_from_file(&mut self, file_path: String) -> Result<String, ClusterExceptions> {
+      pub fn count_nodes(&self) -> usize {
+        self.nodes.len()
+      }
 
-      // Receive read request message
-      // File path retrieved from request
-      // Nodes are retrieved from cluster
-      // File path is added to file manager record
-      // Byte ordinals are generated for file based on nodes
-      // Transaction message is created that has a read request for each node with ordinal positions
-      // Depending on the FileSystemType, read is either receive bytes from home client and write to local file
-      // or, read existing file on distributed file share
-      // Read transaction completed or failed
+      pub fn get_node_metadata(&self, node: String) -> Result<&Node, ClusterExceptions> {
 
-      // Get nodes
-      let nodes = self.get_nodes();
+        let node_fetch = self.nodes.get(&node);
 
-      // Inserts hash of file path into FileSystemManager
-      if let Ok(file_path_hash) = self.file_system_manager.read_from_file(file_path.clone(), &nodes) {
+        if let Some(node_metadata) = node_fetch {
+          Ok(node_metadata)
+        }
+        else {
+          Err(ClusterExceptions::NodeDoesNotExist { error_message: node.clone() })
+        }
 
-        // Open new transaction
-        if let Some(ref mut transaction) = Message::default_request_message(MessageType::Transaction { txn: vec![] } ) {
-          transaction.set_src("cluster-orch".to_string());
+      }
 
-          // TODO
-          // This will pull Node from first element in vector which is not guaranteed to be n1
-          // nodes can also be empty
-          transaction.set_dest(nodes[0].clone());
+      pub fn read_data_from_file(&mut self, file_path: String) -> Result<String, ClusterExceptions> {
 
-          let file_system_type = self.cluster_configuration.working_directory.file_system_type.clone();
+        // Receive read request message
+        // File path retrieved from request
+        // Nodes are retrieved from cluster
+        // File path is added to file manager record
+        // Byte ordinals are generated for file based on nodes
+        // Transaction message is created that has a read request for each node with ordinal positions
+        // Depending on the FileSystemType, read is either receive bytes from home client and write to local file
+        // or, read existing file on distributed file share
+        // Read transaction completed or failed
 
-          let infered_file_schema = FileSystemManager::get_file_header(file_path.clone())?;
-          let infered_file_schema_string = serde_json::to_string(&infered_file_schema)?;
-          let byte_ordinals = FileSystemManager::get_byte_ordinals(file_path.clone(), &nodes)?;
-          let byte_ordinals_string = serde_json::to_string(&byte_ordinals)?;
+        // Get nodes
+        let nodes = self.get_nodes();
 
-          if let Some(file_object) = self.file_system_manager.files.get(&file_path_hash) {
-            transaction.set_body(MessageType::Transaction { txn: vec![vec!["rf".to_string(), file_path.clone(), file_system_type.to_string(), byte_ordinals_string, infered_file_schema_string]] });
+        // Inserts hash of file path into FileSystemManager
+        if let Ok(file_path_hash) = self.file_system_manager.read_from_file(file_path.clone(), &nodes) {
+
+          // Open new transaction
+          if let Some(ref mut transaction) = Message::default_request_message(MessageType::Transaction { txn: vec![] } ) {
+            transaction.set_src("cluster-orch".to_string());
+
+            // TODO
+            // This will pull Node from first element in vector which is not guaranteed to be n1
+            // nodes can also be empty
+            transaction.set_dest(nodes[0].clone());
+
+            let file_system_type = self.cluster_configuration.working_directory.file_system_type.clone();
+
+            let infered_file_schema = FileSystemManager::get_file_header(file_path.clone())?;
+            let infered_file_schema_string = serde_json::to_string(&infered_file_schema)?;
+            let byte_ordinals = FileSystemManager::get_byte_ordinals(file_path.clone(), &nodes)?;
+            let byte_ordinals_string = serde_json::to_string(&byte_ordinals)?;
+
+            if let Some(file_object) = self.file_system_manager.files.get(&file_path_hash) {
+              transaction.set_body(MessageType::Transaction { txn: vec![vec!["rf".to_string(), file_path.clone(), file_system_type.to_string(), byte_ordinals_string, infered_file_schema_string]] });
+            } else {
+              return Err(ClusterExceptions::UnkownClientRequest { error_message: file_path });
+            }
+
+            if let Ok(request_string) = message_serializer(&transaction) {
+              return Ok(request_string);
+            } else {
+              return Err(ClusterExceptions::UnkownClientRequest { error_message: file_path });
+            }
+
           } else {
             return Err(ClusterExceptions::UnkownClientRequest { error_message: file_path });
           }
+      } else {
+        return Err(ClusterExceptions::UnkownClientRequest { error_message: file_path });
+      }
 
-          if let Ok(request_string) = message_serializer(&transaction) {
-            return Ok(request_string);
-          } else {
-            return Err(ClusterExceptions::UnkownClientRequest { error_message: file_path });
-          }
-
-        } else {
-          return Err(ClusterExceptions::UnkownClientRequest { error_message: file_path });
-        }
-    } else {
-      return Err(ClusterExceptions::UnkownClientRequest { error_message: file_path });
     }
 
-  }
-
-  pub fn display_df(&self, df_name: String) -> Result<String, ClusterExceptions> {
+    pub fn display_df(&self, df_name: String) -> Result<String, ClusterExceptions> {
     // TODO
     // Harcoding name for "df" for now
 

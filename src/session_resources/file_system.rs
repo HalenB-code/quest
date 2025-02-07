@@ -1,6 +1,5 @@
 use std::fs::File;
 use std::io::{self, BufRead, Read, Write};
-use std::path::Path;
 use memmap2::Mmap;
 use std::collections::{HashMap, BTreeMap};
 use std::fmt;
@@ -11,7 +10,6 @@ use std::hash::Hasher;
 use serde::Deserialize;
 
 use crate::session_resources::datastore::{DataFrame, Column, ColumnType};
-use crate::session_resources::message::message_serializer;
 use crate::session_resources::datastore::DatastoreExceptions;
 
 use super::exceptions::ClusterExceptions;
