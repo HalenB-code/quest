@@ -11,3 +11,4 @@ serde = { version = "1.0.214", features = ["derive"] }
 tokio = { version = "1.41.1", features = ["full"] }
 memmap2 = "0.9.4"
 prettytable = "0.10.0"
+chrono = "0.4.39"

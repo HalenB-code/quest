@@ -384,6 +384,12 @@ impl From<i32> for Column {
     }
 }
 
+impl From<usize> for Column {
+    fn from(value: usize) -> Self {
+        Column::IntVec(vec![value as i32])
+    }
+}
+
 impl From<f64> for Column {
     fn from(value: f64) -> Self {
         Column::FloatVec(vec![value])

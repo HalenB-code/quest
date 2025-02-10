@@ -11,6 +11,7 @@ use serde::Deserialize;
 
 use crate::session_resources::datastore::{DataFrame, Column, ColumnType};
 use crate::session_resources::datastore::DatastoreExceptions;
+use crate::session_resources::cluster::Cluster;
 
 use super::exceptions::ClusterExceptions;
 
@@ -123,6 +124,8 @@ pub fn read_csv(file_path: String, byte_ordinals: String) -> Result<DataFrame, C
     }
 
 }
+
+
 
 impl FileSystemManager {
 

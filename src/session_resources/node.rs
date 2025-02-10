@@ -16,6 +16,8 @@ use std::hash::Hasher;
 use std::hash::Hash;
 use std::collections::{HashMap, VecDeque};
 use std::fmt::Debug;
+use chrono::Local;
+use chrono::Timelike;
 
 //
 // Node Class
@@ -114,7 +116,7 @@ pub enum NodeRoleType {
 
           if let Some(message) = message_request {
               // drop(message_request); // Release lock immediately
-              println!("{:?} in process_requests", &message);
+              // println!("{:?} in process_requests", &message);
               //println!("{} is active", &self.node_id);
 
               let node_message_queue_ref = self.node_message_log_id().await;
@@ -149,38 +151,51 @@ pub enum NodeRoleType {
                         };
                     },
                     MessageType::Broadcast { .. } => {
-                        let incoming_broadcast_msg =
-                            message.body().unwrap().broadcast_msg().unwrap();
 
-                        {
-                            let mut memory_space = self.node_memory_space.clone();
-                            memory_space
-                                .entry("broadcast_msgs".to_string())
-                                .or_insert_with(Vec::new)
-                                .push(incoming_broadcast_msg);
+                        let incoming_broadcast_msg = message.body().unwrap().broadcast_msg().unwrap();
+                        let mut insert_data = HashMap::new();
+                        insert_data.insert("Broadcast".to_string(), incoming_broadcast_msg);
+                        let broadcast_source = message.src().unwrap();
+
+                        // TODO
+                        // Hardcoding the client request df name as "df" for now
+                        match self.get_dataframe(&"df_broadcast".to_string()) {
+                            None => {
+                                    let df = DataFrame::new(Some(insert_data));
+                                    self.insert_dataframe("df_broadcast".to_string(), df);
+                            },
+                            Some(_df) => {
+                                if let Some(df) = self.get_dataframe_mut(&"df_broadcast".to_string()) {
+                                    df.append_row(insert_data, true);
+                                }
+                            }
                         }
                         
-                        let other_nodes = self.other_node_ids.clone().into_iter().filter(|n| n != &self.node_id).collect::<Vec<String>>();
+                        // To prevent forever broadcasts between nodes, only broadcast to other node if source is not in nodes list
+                        if self.other_node_ids.contains(broadcast_source) {
+
+                            let other_nodes = self.other_node_ids.clone().into_iter().filter(|n| n != &self.node_id).collect::<Vec<String>>();
                         
-                        for other_node in &other_nodes {
-
-                            let propagated_message = Message::Request {
-                                src: self.node_id.clone(),
-                                dest: other_node.clone(),
-                                body: MessageType::Broadcast {
-                                    message: incoming_broadcast_msg.clone(),
-                                },
-                            };
-
-                            let cluster_clone = Arc::clone(cluster);
-                            // Spawn an async task for each propagation
-                            let handle = tokio::spawn(async move {
-                                if let Err(e) = cluster_clone.lock().await.propagate_message(propagated_message).await {
-                                    eprintln!("Propagation failed: {:?}", e);
-                                }
-                            });
-        
-                            propagation_message_handles.push(handle);
+                            for other_node in &other_nodes {
+    
+                                let propagated_message = Message::Request {
+                                    src: self.node_id.clone(),
+                                    dest: other_node.clone(),
+                                    body: MessageType::Broadcast {
+                                        message: incoming_broadcast_msg.clone(),
+                                    },
+                                };
+    
+                                let cluster_clone = Arc::clone(cluster);
+                                // Spawn an async task for each propagation
+                                let handle = tokio::spawn(async move {
+                                    if let Err(e) = cluster_clone.lock().await.propagate_message(propagated_message).await {
+                                        eprintln!("Propagation failed: {:?}", e);
+                                    }
+                                });
+            
+                                propagation_message_handles.push(handle);
+                            }
                         }
 
                         message_response = Message::Response {
@@ -231,6 +246,8 @@ pub enum NodeRoleType {
 
                     // A VectorAdd is a global counter that needs to be consistent across nodes, eventually
                     // Hence a VectorAdd request leads to 1) update on receiving node and 2) a series of follow up requests to update all other nodes so they are consistent
+
+                    let broadcast_source = message.src().unwrap();
                     if let Some(delta) = message.body().unwrap().delta() {
                         
                         if let None = self.get_dataframe(&"df_vector".to_string()) {
@@ -242,20 +259,24 @@ pub enum NodeRoleType {
                         }
 
                         // Now build additional VectorAdd requests, exlcuding calling node
-                        let other_nodes = self.other_node_ids.clone().into_iter().filter(|n| n != &self.node_id).collect::<Vec<String>>();
 
-                        for other_node in other_nodes {
+                        // To prevent forever broadcasts between nodes, only broadcast to other node if source is not in nodes list
+                        if self.other_node_ids.contains(broadcast_source) {
+                            let other_nodes = self.other_node_ids.clone().into_iter().filter(|n| n != &self.node_id).collect::<Vec<String>>();
 
-                            let delta_request = Message::Request {
-                                src: self.node_id.clone(),
-                                dest: other_node,
-                                body: MessageType::VectorAdd { 
-                                    delta: delta.clone()
-                                }
-                            };
+                            for other_node in other_nodes {
 
-                            cluster.lock().await.propagate_message(delta_request).await?;
+                                let delta_request = Message::Request {
+                                    src: self.node_id.clone(),
+                                    dest: other_node,
+                                    body: MessageType::VectorAdd { 
+                                        delta: delta.clone()
+                                    }
+                                };
 
+                                cluster.lock().await.propagate_message(delta_request).await?;
+
+                            }
                         }
 
                         message_response = Message::Response {
@@ -263,7 +284,7 @@ pub enum NodeRoleType {
                             dest: message.src().unwrap().to_string(),
                             body: MessageType::VectorAddOk {},
                         };
-                        
+
                     } else {
                         return Err(ClusterExceptions::InvalidClusterRequest {
                         error_message_1: message.clone(),
@@ -479,6 +500,24 @@ pub enum NodeRoleType {
                         }
 
                     },
+                    MessageType::LogMessages { .. } => {
+
+                        let cluster = &cluster.lock().await;
+
+                        if let Ok(()) = Cluster::log_messages(cluster) {
+
+                            message_response = Message::Response {
+                                    src: message.dest().unwrap().to_string(),
+                                    dest: message.src().unwrap().to_string(),
+                                    body: MessageType::LogMessagesOk {
+                                    }
+                                };
+
+                        } else {
+                            return Err(ClusterExceptions::FailedToWriteLogMessages { error_message: cluster.cluster_id.clone() } );
+                        }
+
+                    },
                     _ => { 
                         return Err(ClusterExceptions::UnkownClientRequest {
                             error_message: "Response type not yet created".to_string(),
@@ -513,32 +552,28 @@ pub enum NodeRoleType {
     }
 
     pub fn generate_unique_id(&self) -> String {
-      // Extract numeric part from the input string
-      let seed: usize = self.node_id
-      .chars()
-      .filter(|c| c.is_numeric())
-      .collect::<String>()
-      .parse()
-      .unwrap_or(0);
 
-      // Use the numeric part as a seed for a hash-based random number generator
-      let mut hasher = DefaultHasher::new();
-      seed.hash(&mut hasher);
-      let mut hash_value = hasher.finish() as usize;
+        let now = Local::now();
+        let seed = now.second() % 10;
 
-      // Alphanumeric character set
-      let charset = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-      let charset_len = charset.len() as usize;
+        // Use the numeric part as a seed for a hash-based random number generator
+        let mut hasher = DefaultHasher::new();
+        seed.hash(&mut hasher);
+        let mut hash_value = hasher.finish() as usize;
 
-      // Generate a 10-character alphanumeric ID
-      let mut id = String::new();
-      for _ in 0..10 {
-          let index = (hash_value % charset_len) as usize;
-          id.push(charset.chars().nth(index).unwrap());
-          hash_value /= charset_len;
-      }
+        // Alphanumeric character set
+        let charset = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+        let charset_len = charset.len() as usize;
 
-      id
+        // Generate a 10-character alphanumeric ID
+        let mut id = String::new();
+        for _ in 0..10 {
+            let index = (hash_value % charset_len) as usize;
+            id.push(charset.chars().nth(index).unwrap());
+            hash_value /= charset_len;
+        }
+
+        id
     }
 
     pub async fn node_message_log_id(&self) -> usize {

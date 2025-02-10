@@ -28,27 +28,34 @@ pub enum ClusterExceptions {
     FileSystemError(FileSystemExceptions),
     DatastoreError(DatastoreExceptions),
     MessageStatusNotUpdated { error_message: String },
+    FailedToWriteLogMessages { error_message: String },
+    TokioTaskJoinError(tokio::task::JoinError),
+    InvalidArgumentsSuppliedForRequest { error_message: String },
+    NodeMessagePropogationFailed { error_message: String },
     // Add other error types here
 }
 
-// Implement `From` for `io::Error`
 impl From<io::Error> for ClusterExceptions {
     fn from(error: io::Error) -> Self {
         ClusterExceptions::IOError(error)
     }
 }
 
-// Implement `From` for `serde_json::Error`
 impl From<serde_json::Error> for ClusterExceptions {
     fn from(error: serde_json::Error) -> Self {
         ClusterExceptions::JsonError(error)
     }
 }
 
-// Implement `From` for `serde_json::Error`
 impl From<MessageExceptions> for ClusterExceptions {
     fn from(error: MessageExceptions) -> Self {
         ClusterExceptions::MessageError(error)
+    }
+}
+
+impl From<tokio::task::JoinError> for ClusterExceptions {
+    fn from(error: tokio::task::JoinError) -> Self {
+        ClusterExceptions::TokioTaskJoinError(error)
     }
 }
 
@@ -111,6 +118,18 @@ impl fmt::Display for ClusterExceptions {
             ClusterExceptions::MessageStatusNotUpdated { error_message } => {
                 write!(f, "Message '{}' status could not be updated.", error_message)
             },
+            ClusterExceptions::FailedToWriteLogMessages { error_message } => {
+                write!(f, "Messages for Cluster '{}' could not be written to file.", error_message)
+            },
+            ClusterExceptions::TokioTaskJoinError(error_message) => { 
+                write!(f, "Tokio task join error occurred: {}", error_message)
+            },
+            ClusterExceptions::InvalidArgumentsSuppliedForRequest { error_message } => {
+                write!(f, "Insufficient arguments provided for request '{}'.", error_message)
+            },
+            ClusterExceptions::NodeMessagePropogationFailed { error_message } => {
+                write!(f, "Node '{}' failed to propogate messages related to request.", error_message)
+            }
         }
     }
 }

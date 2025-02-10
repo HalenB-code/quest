@@ -4,6 +4,8 @@ use std::fmt;
 use std::collections::HashMap;
 use crate::session_resources::file_system::FileSystemType;
 
+use super::exceptions::ClusterExceptions;
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(untagged, rename_all = "lowercase")]
 pub enum Message {
@@ -44,6 +46,7 @@ pub enum MessageType {
         echo: String,
     },
     Generate {
+        msg_id: usize,
     },
     #[serde(rename = "generate_ok")]
     GenerateOk {
@@ -72,7 +75,8 @@ pub enum MessageType {
     },
     #[serde(rename = "topology_ok")]
     TopologyOk {
-    },    #[serde(rename = "add")]
+    },
+    #[serde(rename = "add")]
     VectorAdd {
         delta: String
     },
@@ -148,6 +152,7 @@ pub enum MessageType {
     },
     GlobalCounterWriteOk {
     },
+    #[serde(rename = "read-file")]
     ReadFromFile {
         file_path: String,
         accessibility: String,
@@ -156,11 +161,17 @@ pub enum MessageType {
     },
     ReadFromFileOk{
     },
+    #[serde(rename = "display-df")]
     DisplayDf {
         df_name: String,
         total_rows: usize
     },
-    DisplayDfOk{
+    DisplayDfOk {
+    },
+    #[serde(rename = "log")]
+    LogMessages {
+    },
+    LogMessagesOk {
     }
 }
 
@@ -193,7 +204,15 @@ mod as_json_string {
 
 // Deserializer for Message
 pub fn message_deserializer(input_string: &String) -> Result<Message> {
-    serde_json::from_str(input_string)
+
+    match input_string.trim() {
+        "log" => Ok(Message::Request {
+            src: "system".to_string(),
+            dest: "logger".to_string(),
+            body: MessageType::LogMessages {},
+        }),
+        _ => serde_json::from_str(input_string)
+    }
 }
 
 // Serializer for Message
@@ -239,14 +258,16 @@ impl fmt::Display for MessageType {
             MessageType::ReadFromFile { .. } => write!(f, "ReadFromFile"),
             MessageType::ReadFromFileOk { .. } => write!(f, "ReadFromFileOk"),
             MessageType::DisplayDf { .. } => write!(f, "DisplayDf"),
-            MessageType::DisplayDfOk { .. } => write!(f, "DisplayDfOk"),        
+            MessageType::DisplayDfOk { .. } => write!(f, "DisplayDfOk"),
+            MessageType::LogMessages { .. } => write!(f, "LogMessages"),
+            MessageType::LogMessagesOk { .. } => write!(f, "LogMessagesOk"),  
         }
     }
 }
 
 // Trait to access fields in `Message`
 pub trait MessageFields {
-    fn msg_type(&self) -> Option<&String>;
+    fn msg_type(&self) -> Option<String>;
     fn msg_id(&self) -> Option<usize>;
     fn node_id(&self) -> Option<&String>;
     fn node_ids(&self) -> Option<&[String]>;
@@ -265,6 +286,7 @@ pub trait MessageFields {
 
 // Trait to access fields in `MessageType`
 pub trait MessageTypeFields {
+    fn get_type(&self) -> String;
     fn msg_id(&self) -> Option<usize>;
     fn echo(&self) -> Option<&String>;
     fn in_reply_to(&self) -> Option<usize>;
@@ -288,11 +310,12 @@ pub trait MessageTypeFields {
 // Implement `MessageFields` for `Message`
 impl MessageFields for Message {
 
-    fn msg_type(&self) -> Option<&String> {
-        if let Message::Init { msg_type, .. } = self {
-            Some(msg_type)
-        } else {
-            None
+    fn msg_type(&self) -> Option<String> {
+        match self {
+            Message::Init { msg_type, .. } => Some(msg_type.clone()),
+            Message::Request { body, .. } | Message::Response { body, .. } => {
+                Some(body.get_type())
+            }
         }
     }
 
@@ -395,10 +418,54 @@ impl MessageFields for Message {
 
 // Implement `MessageTypeFields` for `MessageType`
 impl MessageTypeFields for MessageType {
+
+    fn get_type(&self) -> String {
+        match self {
+            MessageType::Echo { .. } => "echo".to_string(),
+            MessageType::EchoOk { .. } => "echo_ok".to_string(),
+            MessageType::Generate { .. } => "generate".to_string(),
+            MessageType::GenerateOk { .. } => "generate_ok".to_string(),
+            MessageType::Broadcast { .. } => "broadcast".to_string(),
+            MessageType::BroadcastOk { .. } => "broadcast_ok".to_string(),
+            MessageType::BroadcastRead { .. } => "broadcast_read".to_string(),
+            MessageType::BroadcastReadOk { .. } => "broadcast_read_ok".to_string(),
+            MessageType::Topology { .. } => "topology".to_string(),
+            MessageType::TopologyOk { .. } => "topology_ok".to_string(),
+            MessageType::VectorAdd { .. } => "add".to_string(),
+            MessageType::VectorAddOk { .. } => "add_ok".to_string(),
+            MessageType::VectorRead { .. } => "read".to_string(),
+            MessageType::VectorReadOk { .. } => "read_ok".to_string(),
+            MessageType::Send { .. } => "send".to_string(),
+            MessageType::SendOk { .. } => "send_ok".to_string(),
+            MessageType::Poll { .. } => "poll".to_string(),
+            MessageType::PollOk { .. } => "commit_offsets".to_string(),
+            MessageType::CommitOffsets { .. } => "commit_offsets".to_string(),
+            MessageType::CommitOffsetsOk { .. } => "commit_offsets_ok".to_string(),
+            MessageType::ListCommitedOffsets { .. } => "list_commited_offsets".to_string(),
+            MessageType::ListCommitedOffsetsOk { .. } => "list_commited_offsets_ok".to_string(),
+            MessageType::Transaction { .. } => "txn".to_string(),
+            MessageType::TransactionOk { .. } => "txn_ok".to_string(),
+            MessageType::KeyValueRead { .. } => "key_value_read".to_string(),
+            MessageType::KeyValueReadOk { .. } => "key_value_read_ok".to_string(),
+            MessageType::KeyValueWrite { .. } => "key_value_write".to_string(),
+            MessageType::KeyValueWriteOk { .. } => "key_value_write_ok".to_string(),
+            MessageType::GlobalCounterRead { .. } => "global_counter_read".to_string(),
+            MessageType::GlobalCounterReadOk { .. } => "global_counter_read_ok".to_string(),
+            MessageType::GlobalCounterWrite { .. } => "global_counter_write".to_string(),
+            MessageType::GlobalCounterWriteOk { .. } => "global_counter_write_ok".to_string(),
+            MessageType::ReadFromFile { .. } => "read_from_file".to_string(),
+            MessageType::ReadFromFileOk { .. } => "read_from_file_ok".to_string(),
+            MessageType::DisplayDf { .. } => "display_df".to_string(),
+            MessageType::DisplayDfOk { .. } => "display_df_ok".to_string(),
+            MessageType::LogMessages { .. } => "log_messages".to_string(),
+            MessageType::LogMessagesOk { .. } => "log_messages_ok".to_string(),
+        }
+    }
+
     fn msg_id(&self) -> Option<usize> {
         match self {
             MessageType::Echo { msg_id, .. } | MessageType::EchoOk { msg_id, .. } => Some(*msg_id),
-            MessageType::GenerateOk { msg_id, .. } => Some(*msg_id),
+            MessageType::Generate { msg_id, .. } | MessageType::GenerateOk { msg_id, .. } => Some(*msg_id),
             MessageType::BroadcastOk { msg_id, .. } => Some(*msg_id),
             _ => None,
         }

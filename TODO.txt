@@ -21,15 +21,19 @@ _ Generate
 {"src": "c2", "dest": "n2", "body": {"type": "echo", "msg_id": 1, "echo": "Please echo howzit"}}
 
 _Unique ID 
-{"src": "c1", "dest": "n1", "body": {"type": "generate"}}
+{"src": "c1", "dest": "n1", "body": {"type": "generate", "msg_id": 1}}
 
 
 _Broadcast
 {"src": "c2", "dest": "n2", "body": {"type": "broadcast", "message": 10}}
 
+{"src": "c2", "dest": "n1", "body": {"type": "broadcast", "message": 10}}
+
+_Broadcast Read
+{"src": "c2", "dest": "n1", "body": {"type": "read", "message": 10}}
 
 
-
+-a display-df -df_name df_broadcast
 
 {"type":"init","msg_id":1,"node_id":"n1","node_ids":["n2"]} 
 
