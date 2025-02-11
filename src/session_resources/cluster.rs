@@ -372,7 +372,7 @@ pub struct Cluster {
 
     }
 
-    pub fn read_data_from_file(&mut self, file_path: String) -> Result<String, ClusterExceptions> {
+    pub fn read_data_from_file(&mut self, file_path: String, delimiter: Option<String>) -> Result<String, ClusterExceptions> {
 
     // Receive read request message
     // File path retrieved from request
@@ -386,10 +386,17 @@ pub struct Cluster {
 
     // Get nodes
     let nodes = self.get_nodes();
+    let separator: u8;
+    
+    if let Some(delim) = delimiter {
+      separator = delim.as_bytes()[0];
+    } else {
+      separator = ",".to_string().as_bytes()[0];
+    }
 
     // Inserts hash of file path into FileSystemManager
     if let Ok(file_path_hash) = self.file_system_manager.read_from_file(file_path.clone(), &nodes) {
-
+      
       // Open new transaction
       if let Some(ref mut transaction) = Message::default_request_message(MessageType::Transaction { txn: vec![] } ) {
         transaction.set_src("cluster-orch".to_string());
@@ -401,12 +408,12 @@ pub struct Cluster {
 
         let file_system_type = self.cluster_configuration.working_directory.file_system_type.clone();
 
-        let infered_file_schema = FileSystemManager::get_file_header(file_path.clone())?;
+        let infered_file_schema = FileSystemManager::get_file_header(file_path.clone(), separator)?;
         let infered_file_schema_string = serde_json::to_string(&infered_file_schema)?;
         let byte_ordinals = FileSystemManager::get_byte_ordinals(file_path.clone(), &nodes)?;
         let byte_ordinals_string = serde_json::to_string(&byte_ordinals)?;
-
-        if let Some(file_object) = self.file_system_manager.files.get(&file_path_hash) {
+        
+        if let Some(_file_object) = self.file_system_manager.files.get(&file_path_hash) {
           transaction.set_body(MessageType::Transaction { txn: vec![vec!["rf".to_string(), file_path.clone(), file_system_type.to_string(), byte_ordinals_string, infered_file_schema_string]] });
         } else {
           return Err(ClusterExceptions::UnkownClientRequest { error_message: file_path });
@@ -457,10 +464,11 @@ pub struct Cluster {
     pub fn map_request(&mut self, request: String) -> Result<String, ClusterExceptions> {
 
       let args: Vec<String> = request.split(" ").map(|element| element.to_string()).collect();
-      println!("{:?}", args);
+      // println!("{:?}", args);
       let mut action = None;
       let mut file_path = None;
       let mut df_name = None;
+      let mut delimiter: Option<String> = None;
 
       let mut iter = args.iter().peekable();
       while let Some(arg) = iter.next() {
@@ -468,17 +476,18 @@ pub struct Cluster {
               "-a" => action = iter.next().map(|s| s.clone()),
               "-fp" => file_path = iter.next().map(|s| s.clone()),
               "-df_name" => df_name = iter.next().map(|s| s.clone()),
+              "-delimiter" => delimiter = iter.next().map(|s| s.clone()),
               _ => {}
           }
       }
-      
+
       if let Some(parsed_action) = action.clone() {
         match parsed_action.as_str() {
-          "read_file" => {
+          "read-file" => {
             // TODO
             // Need to accept df name when read request received
             if let Some(fp) = file_path {
-              let request_string = self.read_data_from_file(fp.to_string())?;
+              let request_string = self.read_data_from_file(fp.to_string(), delimiter)?;
               return Ok(request_string);
             } else {
               return Err(ClusterExceptions::NodeDoesNotExist { error_message: request });

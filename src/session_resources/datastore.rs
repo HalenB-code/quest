@@ -30,21 +30,27 @@ pub struct DataFrame {
 
 impl DataFrame {
 
-    pub fn new<T>(data: Option<HashMap<String, T>>) -> Self 
+    pub fn new<T>(data: Option<HashMap<String, Vec<T>>>) -> Self
     where
-    T: Into<Column>
+        T: ToString + Clone,
     {
         let mut df = DataFrame {
             columns: HashMap::new(),
         };
 
-        if let Some(data) = data {
-            let inferred_data = DataFrame::infer_type(data);
+        if let Some(df_data) = data {
+            // Convert all `T` into `Vec<T>` before inferring column types.
+            let coerced_data: HashMap<String, Vec<T>> = df_data
+                .into_iter()
+                .map(|(key, value)| (key, value.into()))
+                .collect();
 
-            if let Some(inferred_data) = inferred_data {
-                for (col_name, column_values) in inferred_data {
-                    df.columns.insert(col_name, column_values);
-                }
+            let inferred_data = DataFrame::infer_type(coerced_data);
+
+            println!("{:?}", inferred_data);
+
+            for (col_name, column_values) in inferred_data {
+                df.columns.insert(col_name, column_values);
             }
         }
 
@@ -52,20 +58,65 @@ impl DataFrame {
     }
 
     // Function to infer type from a sample
-    pub fn infer_type<T>(data: HashMap<String, T>) -> Option<HashMap<String, Column>>
+    pub fn infer_type<T>(data: HashMap<String, Vec<T>>) -> HashMap<String, Column>
     where
-    T: Into<Column>
+        T: ToString + Clone,
     {
         let mut columns: HashMap<String, Column> = HashMap::new();
 
-        for (key, value) in data {
-            let column_value: Column = value.into();
-            columns.insert(key, column_value);
+        let sample_size: usize;
+        if data.len() < 50 {
+            sample_size = data.keys().len();
+        } else {
+            sample_size = 50;
+        }
+    
+        for (key, values) in data {
+            let sample: Vec<String> = values.iter().take(sample_size).map(|val| val.to_string()).collect();
+            let column = DataFrame::infer_column_type(sample, values);
+            columns.insert(key, column);
         }
 
-        Some(columns)
-
+        columns
     }
+
+    /// Infers type based on sampled data and returns a `Column` enum with parsed values
+    pub fn infer_column_type<T>(sample: Vec<String>, full_data: Vec<T>) -> Column
+    where
+        T: ToString + Clone,
+    {
+        let full_data_strings: Vec<String> = full_data.iter().map(|val| val.to_string()).collect();
+
+        if sample.iter().all(|val| val.parse::<i32>().is_ok()) {
+            Column::IntVec(full_data_strings.into_iter().map(|x| x.parse::<i32>().unwrap()).collect())
+        } else if sample.iter().all(|val| val.parse::<f64>().is_ok()) {
+            Column::FloatVec(full_data_strings.into_iter().map(|x| x.parse::<f64>().unwrap()).collect())
+        } else if sample.iter().all(|val| val == "true" || val == "false") {
+            Column::BoolVec(full_data_strings.into_iter().map(|x| x == "true").collect())
+        } else if sample.iter().all(|val| val.starts_with("[") && val.ends_with("]")) {
+            if sample.iter().all(|val| DataFrame::parse_nested::<i32>(val).is_some()) {
+                Column::IntNestedVec(full_data_strings.into_iter().map(|x| DataFrame::parse_nested::<i32>(&x).unwrap()).collect())
+            } else if sample.iter().all(|val| DataFrame::parse_nested::<f64>(val).is_some()) {
+                Column::FloatNestedVec(full_data_strings.into_iter().map(|x| DataFrame::parse_nested::<f64>(&x).unwrap()).collect())
+            } else if sample.iter().all(|val| DataFrame::parse_nested::<bool>(val).is_some()) {
+                Column::BoolNestedVec(full_data_strings.into_iter().map(|x| DataFrame::parse_nested::<bool>(&x).unwrap()).collect())
+            } else {
+                Column::StringNestedVec(full_data_strings.into_iter().map(|x| DataFrame::parse_nested::<String>(&x).unwrap()).collect())
+            }
+        } else {
+            Column::StringVec(full_data_strings)
+        }
+    }
+
+    /// Parses nested `[x, y, z]` formatted data into `Vec<T>`, handling whitespace
+    pub fn parse_nested<T: std::str::FromStr>(input: &str) -> Option<Vec<T>> {
+        input
+            .trim_matches(|c| c == '[' || c == ']')
+            .split(',')
+            .map(|x| x.trim().parse::<T>().ok())
+            .collect()
+    }
+
 
     pub fn add_column(&mut self, name: &str, col: Column) {
         self.columns.insert(name.to_string(), col);
@@ -138,7 +189,7 @@ impl DataFrame {
     pub fn print_table(&self, n_rows: Option<usize>) {
         let mut table = Table::new();
 
-        let n_rows = n_rows.unwrap_or(5);
+        let mut n_rows = n_rows.unwrap_or(5);
 
         // Collect column names
         let column_names: Vec<String> = self.columns.keys().cloned().collect();
@@ -146,6 +197,10 @@ impl DataFrame {
 
         // Determine max row count
         let max_rows = self.columns.values().map(|col| col.len()).max().unwrap_or(0);
+
+        if max_rows < n_rows {
+            n_rows = max_rows;
+        }
 
         // Collect rows
         for i in 0..n_rows {
@@ -300,7 +355,9 @@ impl DataFrame {
         None
     }
 
-
+    pub fn get_columns(&self) -> Vec<String> {
+        self.columns.clone().into_keys().collect::<Vec<String>>()
+    }
 
     pub fn insert_offsets(&mut self, key_value_insert: HashMap<String, String>) -> Option<usize> {
 
@@ -362,9 +419,11 @@ pub enum ColumnType {
     IntVec,
     FloatVec,
     StringVec,
+    BoolVec,
     IntNestedVec,
     FloatNestedVec,
     StringNestedVec,
+    BoolNestedVec
 }
 
 // Define an enum to represent dynamically typed column data
@@ -372,10 +431,12 @@ pub enum ColumnType {
 pub enum Column {
     IntVec(Vec<i32>),
     FloatVec(Vec<f64>),
+    BoolVec(Vec<bool>),
     StringVec(Vec<String>),
     IntNestedVec(Vec<Vec<i32>>),
     FloatNestedVec(Vec<Vec<f64>>),
     StringNestedVec(Vec<Vec<String>>),
+    BoolNestedVec(Vec<Vec<bool>>),
 }
 
 impl From<i32> for Column {
@@ -411,6 +472,12 @@ impl From<&str> for Column {
 impl From<Vec<i32>> for Column {
     fn from(value: Vec<i32>) -> Self {
         Column::IntVec(value)
+    }
+}
+
+impl From<Vec<usize>> for Column {
+    fn from(value: Vec<usize>) -> Self {
+        Column::IntVec(value.iter().map(|x| *x as i32).collect())
     }
 }
 
@@ -516,9 +583,11 @@ impl Column {
             Column::IntVec(_) => ColumnType::IntVec,
             Column::FloatVec(_) => ColumnType::FloatVec,
             Column::StringVec(_) => ColumnType::StringVec,
+            Column::BoolVec(_) => ColumnType::StringVec,
             Column::IntNestedVec(_) => ColumnType::IntNestedVec,
             Column::FloatNestedVec(_) => ColumnType::FloatNestedVec,
             Column::StringNestedVec(_) => ColumnType::StringNestedVec,
+            Column::BoolNestedVec(_) => ColumnType::StringNestedVec,
         }
     }
 
@@ -527,9 +596,11 @@ impl Column {
             Column::IntVec(_) => "Int".to_string(),
             Column::FloatVec(_) => "Float".to_string(),
             Column::StringVec(_) => "String".to_string(),
+            Column::BoolVec(_) => "Bool".to_string(),
             Column::IntNestedVec(_) => "IntNested".to_string(),
             Column::FloatNestedVec(_) => "FloatNested".to_string(),
             Column::StringNestedVec(_) => "StringNested".to_string(),
+            Column::BoolNestedVec(_) => "BoolNested".to_string(),
         }
     }
 
@@ -538,9 +609,11 @@ impl Column {
             Column::IntVec(v) => v.get(index).map_or("".to_string(), |x| x.to_string()),
             Column::FloatVec(v) => v.get(index).map_or("".to_string(), |x| x.to_string()),
             Column::StringVec(v) => v.get(index).map_or("".to_string(), |x| x.clone()),
+            Column::BoolVec(v) => v.get(index).map_or("".to_string(), |x| x.to_string()),
             Column::IntNestedVec(v) => v.get(index).map_or("".to_string(), |x| format!("{:?}", x)),
             Column::FloatNestedVec(v) => v.get(index).map_or("".to_string(), |x| format!("{:?}", x)),
             Column::StringNestedVec(v) => v.get(index).map_or("".to_string(), |x| format!("{:?}", x)),
+            Column::BoolNestedVec(v) => v.get(index).map_or("".to_string(), |x| format!("{:?}", x)),
         }
     }
 
@@ -558,9 +631,11 @@ impl Column {
             Column::IntVec(v) => v.len(),
             Column::FloatVec(v) => v.len(),
             Column::StringVec(v) => v.len(),
+            Column::BoolVec(v) => v.len(),
             Column::IntNestedVec(v) => v.len(),
             Column::FloatNestedVec(v) => v.len(),
             Column::StringNestedVec(v) => v.len(),
+            Column::BoolNestedVec(v) => v.len(),
         }
     }
 

@@ -23,6 +23,7 @@ impl WriteAheadLog {
     pub fn new(path: &str) -> io::Result<Self> {
         let file = OpenOptions::new()
             .create(true)
+            .truncate(true)
             .append(true)
             .open(path)?;
         Ok(Self {

@@ -64,26 +64,63 @@ pub fn get_mmap(file_path: String) -> Result<Mmap, ClusterExceptions> {
     Ok(mmap)
 }
 
-pub fn read_mmap_bytes(file_path: String, file_handler: &[u8], row_terminator: u8, column_delimiter: u8) -> Result<HashMap<String, Vec<String>>, ClusterExceptions> {
+pub fn read_mmap_bytes(file_handler: &[u8], row_terminator: u8, column_delimiter: u8) -> Result<HashMap<String, Vec<String>>, ClusterExceptions> {
+    let buffer = &file_handler[..];
+    Ok(structure_bytes(buffer, row_terminator, column_delimiter))
+}
+
+pub fn read_csv(node: &String, file_path: String, byte_ordinals: String, delimiter: Option<u8>) -> Result<DataFrame, ClusterExceptions> {
+    const LINE_TERMINATOR: u8 = 10;
+
+    // Create file object and reader
+    let mmap = get_mmap(file_path.clone())?;
+    let get_byte_ordinals: HashMap<String, [u8;2]> = serde_json::from_str(byte_ordinals.as_str())?;
+    let get_byte_positions = get_byte_ordinals.get_key_value(node);
+
+    if let Some(byte_positions) = get_byte_positions {
+        let bytes = byte_positions.1;
+        let start_position = bytes[0] as usize;
+        let end_position = bytes[1] as usize;
+        let bytes_mmap = &mmap[start_position..end_position];
+
+        let separator: u8;
+    
+        if let Some(delim) = delimiter {
+            separator = delim;
+        } else {
+            // Default to , if no delimiter supplied in function call
+            separator = 44 as u8;
+        }
+    
+        let raw_data = read_mmap_bytes(bytes_mmap, LINE_TERMINATOR, separator)?;
+        let df = DataFrame::new(Some(raw_data));
+    
+        Ok(df)
+
+    } else {
+        return Err(ClusterExceptions::FileSystemError(FileSystemExceptions::FailedToMapFile { error_message: byte_ordinals }))
+    }
+
+}
+
+pub fn structure_bytes(data: &[u8], row_terminator: u8, column_delimiter: u8) -> HashMap<String, Vec<String>> {
     // Used to store the actual values relating to each column: Col_1: [Val_1, Val_2, Val_3]
     let mut bytes: HashMap<String, Vec<String>> = HashMap::new();
 
     // Used to store index position of value for each column: 0: Col_1, 1: Col_2, 2: Col_3
     let mut columns = HashMap::new();
 
-    let buffer = &file_handler[..];
-
     // Split buffer by row terminator
-    for (iter, line) in buffer.split(|delimiter| *delimiter == row_terminator).into_iter().enumerate() {
+    for (iter, line) in data.split(|delimiter| *delimiter == row_terminator).into_iter().enumerate() {
 
         // Split line by column delimiter
         for (idx, value) in line.split(|delimiter| *delimiter == column_delimiter).into_iter().enumerate() {
 
             // Convert ASCII bytes to string
             if let Ok(ascii_line) = String::from_utf8(value.to_vec()) {
-                if iter == 1 {
-                    bytes.insert(ascii_line.clone(), vec![]);
-                    columns.insert(idx, ascii_line.clone());
+                if iter == 0 {
+                    bytes.insert(ascii_line.clone().trim_ascii().to_string(), vec![]);
+                    columns.insert(idx, ascii_line.clone().trim_ascii().to_string());
                 }
                 else {
                     if let Some(column) = columns.get_key_value(&idx) {
@@ -93,39 +130,12 @@ pub fn read_mmap_bytes(file_path: String, file_handler: &[u8], row_terminator: u
                     }
                     
                 }
-            } else {
-                return Err(ClusterExceptions::FileSystemError(FileSystemExceptions::CSVReadParseError { error_message: file_path.to_string() }));
             }
-        }
+        }   
     }
 
-    
-
-    Ok(bytes)
-
+    bytes
 }
-
-pub fn read_csv(file_path: String, byte_ordinals: String) -> Result<DataFrame, ClusterExceptions> {
-
-    // Create file object and reader
-    let mmap = get_mmap(file_path.clone())?;
-    let bytes: (usize, usize) = serde_json::from_str(byte_ordinals.as_str())?;
-    let bytes_mmap = &mmap[bytes.0..bytes.1];
-
-    let raw_data = read_mmap_bytes(file_path.clone(), bytes_mmap, 10, 50)?;
-    if let Some(data_inferred_types) = DataFrame::infer_type(raw_data) {
-
-        let df = DataFrame::new(Some(data_inferred_types));
-
-        Ok(df)
-
-    } else {
-        return Err(ClusterExceptions::DatastoreError(DatastoreExceptions::DataTypeInferenceFailed { error_message: file_path.clone() } ))
-    }
-
-}
-
-
 
 impl FileSystemManager {
 
@@ -139,16 +149,17 @@ impl FileSystemManager {
     pub fn get_byte_ordinals(file_path: String, nodes: &Vec<String>) -> Result<BTreeMap<String, (usize, usize)>, ClusterExceptions> {
 
         let n_threads = nodes.len();
+        const ROW_TERMINATOR: u8 = 10;
 
         // Create file object and reader
         let mmap = get_mmap(file_path.clone())?;
-    
+
         // _1__ Determine number of lines in file
         let no_crlf = Arc::new(Mutex::new(0_usize));
         let total_bytes = mmap[..].len();
         let modulo: usize = total_bytes % n_threads;
         let chunk_size: usize = (total_bytes - modulo) / n_threads;
-        let mut mmap_positions: Arc<Mutex<BTreeMap<String, (usize, usize)>>> = Arc::new(Mutex::new(BTreeMap::new()));
+        let mmap_positions: Arc<Mutex<BTreeMap<String, (usize, usize)>>> = Arc::new(Mutex::new(BTreeMap::new()));
         let nodes = Arc::new(nodes);
     
         thread::scope(|s| {
@@ -157,7 +168,7 @@ impl FileSystemManager {
 
             for n in 0..n_threads {
                 // Count + Byte position of last terminator in byte block consumed by thread
-                let mut mmap_positions_temp: Arc<Mutex<BTreeMap<String, (usize, usize)>>> = Arc::clone(&mmap_positions);
+                let mmap_positions_temp: Arc<Mutex<BTreeMap<String, (usize, usize)>>> = Arc::clone(&mmap_positions);
                 let line_count = Arc::clone(&no_crlf);
                 let nodes_clone = Arc::clone(&nodes);
             
@@ -177,11 +188,10 @@ impl FileSystemManager {
                 s.spawn(move || {
         
                     let mut thread_index = start_pos;
-                    let mut thread_index_start = start_pos;
             
                     for byte in &thread_mmap[..] {
                         
-                        if *byte == 10 {
+                        if *byte == ROW_TERMINATOR {
                             *line_count.lock().unwrap() += 1;
                 
                             mmap_positions_temp.lock()
@@ -199,71 +209,60 @@ impl FileSystemManager {
 
         let stamped_byte_ordinals = mmap_positions.lock();
 
-        if let Ok(mmap_return) = stamped_byte_ordinals {
-            Ok(mmap_return.clone())
-        } else {
-            Err(ClusterExceptions::FileSystemError(FileSystemExceptions::FailedToMapFile { error_message: file_path }))
+        let mut next_block_start_position: usize = 0;
+        let mut final_mmap_positions: BTreeMap<String, (usize, usize)> = BTreeMap::new();
+        
+        for (n, (node, positions)) in stamped_byte_ordinals.unwrap().clone().into_iter().enumerate() {
+        
+            match n {
+            0 => {
+                final_mmap_positions.insert(node, (0, positions.1));
+            },
+            x if x > 0 => {
+            final_mmap_positions.insert(node, (next_block_start_position, positions.1));
+            },
+            _ => {
+            eprintln!("Eish...something went wrong looping through mmap_positions!")
+            }
+            }
+            
+            next_block_start_position = positions.1 + 1;
+        
         }
+
+        Ok(final_mmap_positions)
 
     }
 
-    // For now, we will test on CSV type with | delimiter
-    pub fn get_file_header(file_path: String) -> Result<HashMap<String, ColumnType>, ClusterExceptions> {
-        let row_terminator = 10;
-        let column_delimiter = 50;
+    pub fn get_file_header(file_path: String, column_delimiter: u8) -> Result<HashMap<String, ColumnType>, ClusterExceptions> {
+        const ROW_TERMINATOR: u8 = 10;
 
         let mmap = get_mmap(file_path.clone())?;
-        let mut columns: HashMap<usize, String> = HashMap::new();
-
         let mut buffer: Vec<u8> = Vec::new();
-        let mut bytes: HashMap<String, Vec<String>> = HashMap::new();
         let mut sample_counter = 0_usize;
 
         for byte in mmap.iter() {
-            while sample_counter < 50 {
+            if sample_counter < 50 {
                 buffer.push(*byte);
-                if *byte == 10 {
-                    sample_counter += 1;
-                }
+            }
+
+            if *byte == 10 {
+                sample_counter += 1;
             }
         }
 
-        for (iter, line) in buffer.split(|delimiter| *delimiter == row_terminator).into_iter().enumerate() {
-
-            // Split line by column delimiter
-            for (idx, value) in line.split(|delimiter| *delimiter == column_delimiter).into_iter().enumerate() {
-    
-                // Convert ASCII bytes to string
-                if let Ok(ascii_line) = String::from_utf8(value.to_vec()) {
-                    if iter == 1 {
-                        bytes.insert(ascii_line.clone(), vec![]);
-                        columns.insert(idx, ascii_line.clone());
-                    }
-                    else {
-                        if let Some(column) = columns.get_key_value(&idx) {
-                            if let Some(column_data) = bytes.get_mut(column.1) {
-                                column_data.push(ascii_line);
-                            }
-                        }
-                        
-                    }
-                }
-            }
-        }
+        let bytes: HashMap<String, Vec<String>> = structure_bytes(&buffer[..], ROW_TERMINATOR, column_delimiter);
 
         let mut column_schema_return: HashMap<String, ColumnType> = HashMap::new();
-        if let Some(column_schema) = DataFrame::infer_type(bytes) {
+        let column_schema = DataFrame::infer_type(bytes);
 
-            for (column_name, column_type) in column_schema {
-                let column_variant = column_type.column_type();
-                column_schema_return.insert(column_name, column_variant);
-            }
-    
-            Ok(column_schema_return)
-
-        } else {
-            return Err(ClusterExceptions::DatastoreError(DatastoreExceptions::DataTypeInferenceFailed { error_message: file_path.clone() } ));
+        for (column_name, column_type) in column_schema {
+            let column_variant = column_type.column_type();
+            column_schema_return.insert(column_name, column_variant);
         }
+
+        Ok(column_schema_return)
+
 
     }
 
@@ -275,7 +274,7 @@ impl FileSystemManager {
 
             let new_file_object = FileSystemObject { path: file_path.clone(), partition_ordinals: file };
 
-            if let Some(file_existed) = self.files.insert(file_hash, new_file_object) {
+            if let Some(_file_existed) = self.files.insert(file_hash, new_file_object) {
                 Err(ClusterExceptions::FileSystemError(FileSystemExceptions::FailedToMapFile { error_message: file_path }))
             }
             else {

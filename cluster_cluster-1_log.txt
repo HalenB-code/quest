@@ -1,5 +1,0 @@
-1 Init { msg_type: "init", msg_id: 1, node_id: "n1", node_ids: ["n1", "n2", "n3"] } ok
-2 Request { src: "c1", dest: "n1", body: Echo { msg_id: 1, echo: "Please echo howzit" } } ok
-3 Request { src: "c1", dest: "n1", body: Generate { msg_id: 1 } } ok
-4 Request { src: "c2", dest: "n1", body: Broadcast { message: 10 } } ok
-5 Request { src: "system", dest: "logger", body: LogMessages } ok

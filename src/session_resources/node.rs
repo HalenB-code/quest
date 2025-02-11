@@ -154,7 +154,7 @@ pub enum NodeRoleType {
 
                         let incoming_broadcast_msg = message.body().unwrap().broadcast_msg().unwrap();
                         let mut insert_data = HashMap::new();
-                        insert_data.insert("Broadcast".to_string(), incoming_broadcast_msg);
+                        insert_data.insert("Broadcast".to_string(), vec![incoming_broadcast_msg]);
                         let broadcast_source = message.src().unwrap();
 
                         // TODO
@@ -252,7 +252,7 @@ pub enum NodeRoleType {
                         
                         if let None = self.get_dataframe(&"df_vector".to_string()) {
                             let mut insert_data = HashMap::new();
-                            insert_data.insert("Counter".to_string(), delta.as_str());
+                            insert_data.insert("Counter".to_string(), vec![delta.as_str()]);
 
                             let df = DataFrame::new(Some(insert_data));
                             self.insert_dataframe("df_vector".to_string(), df);
@@ -324,7 +324,7 @@ pub enum NodeRoleType {
 
                                 if let None = self.get_dataframe(&"df_keyvalue".to_string()) {
                                     let mut insert_data = HashMap::new();
-                                    insert_data.insert(key.to_string(), value.to_string());
+                                    insert_data.insert(key.to_string(), vec![value.to_string()]);
 
                                     let df = DataFrame::new(Some(insert_data));
                                     self.insert_dataframe("df_keyvalue".to_string(), df);
@@ -457,7 +457,9 @@ pub enum NodeRoleType {
                         let _file_accessibility = message.body().unwrap().file_system_type().unwrap();
                         let file_bytes = message.body().unwrap().file_system_bytes().unwrap();
                         let _file_schema = message.body().unwrap().file_system_schema().unwrap();
-
+                        let delimiter: Option<u8> = Some(124);
+                        
+                        println!("{:?}", message);
                         // TODO
                         // Hardcoding the client request df name as "df" for now
                         match self.get_dataframe(&"df".to_string()) {
@@ -465,7 +467,9 @@ pub enum NodeRoleType {
                                     return Err(ClusterExceptions::DatastoreError(DatastoreExceptions::DfAlreadyExists { error_message: file_path.clone() }));
                             },
                             None => {
-                                if let Ok(df) = file_system::read_csv(file_path.clone(), file_bytes.clone()) {
+                                if let Ok(df) = file_system::read_csv(&self.node_id, file_path.clone(), file_bytes.clone(), delimiter) {
+                                    
+                                    println!("Df columns {:?}", df.get_columns());
                                     self.insert_dataframe("df".to_string(), df);
 
                                     message_response = Message::Response {
