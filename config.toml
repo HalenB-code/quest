@@ -1,11 +1,9 @@
 [working_directory]
-wal_path = "C:\rust\projects\rust-bdc\wal.txt"
-local_path = "C:\rust\projects\rust-bdc"
+wal_path = "C:\\rust\\projects\\rust-bdc\\wal.txt"
+local_path = "C:\\rust\\projects\\rust-bdc"
 file_system_type = "Replicated"
 
-[nodes]
-local
-169.254.227.191 pi01
-169.254.227.192 pi02
-169.254.227.194 pi03
-169.254.227.195 pi04
+[network]
+binding_address = "127.0.0.1"
+orchestrator_port = "8080"
+layout = {0={name="local",port="8081"},1={name="node-1",port="8082"},2={name="node-2",port="8083"},3={name="node-3",port="8084"},4={name="node-4",port="8085"},5={name="node-5",port="8086"}}

@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     hash::Hash,
-    sync::Arc, vec,
+    vec,
 };
 use std::fmt::Debug;
 use std::fmt;
@@ -30,10 +30,7 @@ pub struct DataFrame {
 
 impl DataFrame {
 
-    pub fn new<T>(data: Option<HashMap<String, Vec<T>>>) -> Self
-    where
-        T: ToString + Clone,
-    {
+    pub fn new<T>(data: Option<HashMap<String, Vec<T>>>) -> Self where T: ToString + Clone, {
         let mut df = DataFrame {
             columns: HashMap::new(),
         };
@@ -47,8 +44,6 @@ impl DataFrame {
 
             let inferred_data = DataFrame::infer_type(coerced_data);
 
-            println!("{:?}", inferred_data);
-
             for (col_name, column_values) in inferred_data {
                 df.columns.insert(col_name, column_values);
             }
@@ -58,10 +53,7 @@ impl DataFrame {
     }
 
     // Function to infer type from a sample
-    pub fn infer_type<T>(data: HashMap<String, Vec<T>>) -> HashMap<String, Column>
-    where
-        T: ToString + Clone,
-    {
+    pub fn infer_type<T>(data: HashMap<String, Vec<T>>) -> HashMap<String, Column> where T: ToString + Clone, {
         let mut columns: HashMap<String, Column> = HashMap::new();
 
         let sample_size: usize;
@@ -81,10 +73,7 @@ impl DataFrame {
     }
 
     /// Infers type based on sampled data and returns a `Column` enum with parsed values
-    pub fn infer_column_type<T>(sample: Vec<String>, full_data: Vec<T>) -> Column
-    where
-        T: ToString + Clone,
-    {
+    pub fn infer_column_type<T>(sample: Vec<String>, full_data: Vec<T>) -> Column where T: ToString + Clone, {
         let full_data_strings: Vec<String> = full_data.iter().map(|val| val.to_string()).collect();
 
         if sample.iter().all(|val| val.parse::<i32>().is_ok()) {
@@ -117,21 +106,18 @@ impl DataFrame {
             .collect()
     }
 
-
     pub fn add_column(&mut self, name: &str, col: Column) {
         self.columns.insert(name.to_string(), col);
     }
 
     /// Append a row with `append_new` switch
-    pub fn append_row<T>(&mut self, new_data: HashMap<String, T>, append_new: bool)
-    where
-        T: Into<Column>,
-    {
+    pub fn append_row<T>(&mut self, new_data: HashMap<String, T>, append_new: bool) where T: Into<Column>, {
         for (col_name, values) in new_data {
             let column_value: Column = values.into();
             self.append_value(&col_name, column_value, append_new);
         }
     }
+
     pub fn append_value(&mut self, col_name: &str, value: Column, append_new: bool) {
         match self.columns.get_mut(col_name) {
             Some(existing_col) => match (existing_col, value) {
@@ -214,11 +200,7 @@ impl DataFrame {
         table.printstd();
     }
 
-    pub fn filter<F>(&self, predicate: F) -> Vec<HashMap<String, String>>
-    where
-        F: Fn(&HashMap<String, String>) -> bool,
-        
-    {
+    pub fn filter<F>(&self, predicate: F) -> Vec<HashMap<String, String>> where F: Fn(&HashMap<String, String>) -> bool, {
         let max_rows = self.columns.values().map(|col| col.len()).max().unwrap_or(0);
         let mut result = Vec::new();
 
@@ -493,6 +475,12 @@ impl From<Vec<String>> for Column {
     }
 }
 
+impl From<Vec<&str>> for Column {
+    fn from(value: Vec<&str>) -> Self {
+        Column::StringVec(value.iter().map(|x| x.to_string()).collect())
+    }
+}
+
 impl From<Vec<Vec<i32>>> for Column {
     fn from(value: Vec<Vec<i32>>) -> Self {
         Column::IntNestedVec(value)
@@ -508,6 +496,12 @@ impl From<Vec<Vec<f64>>> for Column {
 impl From<Vec<Vec<String>>> for Column {
     fn from(value: Vec<Vec<String>>) -> Self {
         Column::StringNestedVec(value)
+    }
+}
+
+impl From<Vec<Vec<&str>>> for Column {
+    fn from(value: Vec<Vec<&str>>) -> Self {
+        Column::StringNestedVec(value.iter().map(|sub_vec| sub_vec.into_iter().map(|x| x.to_string()).collect()).collect())
     }
 }
 

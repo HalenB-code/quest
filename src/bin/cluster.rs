@@ -11,12 +11,21 @@ async fn main() {
   let args: Vec<String> = env::args().collect();
 
   let source_path = args[1].clone();
+  let allow_node_init = args[2].clone().parse::<bool>().unwrap();
 
   let implementation: Implementation = Implementation::EAGER;
   let message_execution_target = MessageExecutionType::StdOut;
   let (tx, rx) = mpsc::channel::<String>(100);
 
-  let cluster: Cluster = Cluster::create(1, rx, message_execution_target, source_path);
+  let mut cluster: Cluster = Cluster::create(1, tx.clone(), rx, message_execution_target, source_path);
+
+  if !allow_node_init {
+    // Establish node network
+    cluster.network_manager.create_network().await;
+  }
+
+  // TODO
+  // Establish network here
  
   let mut session = Session::new(cluster, implementation, tx.clone());
   

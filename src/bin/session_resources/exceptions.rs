@@ -6,6 +6,8 @@ use crate::session_resources::transactions::TransactionExceptions;
 use crate::session_resources::file_system::FileSystemExceptions;
 use crate::session_resources::datastore::DatastoreExceptions;
 
+use super::network::NetworkExceptions;
+
 #[derive(Debug)]
 pub enum ClusterExceptions {
     IOError(io::Error),
@@ -32,6 +34,8 @@ pub enum ClusterExceptions {
     TokioTaskJoinError(tokio::task::JoinError),
     InvalidArgumentsSuppliedForRequest { error_message: String },
     NodeMessagePropogationFailed { error_message: String },
+    NetworkError(NetworkExceptions),
+    RemoteNodeRequestError { error_message: String },
     // Add other error types here
 }
 
@@ -56,6 +60,12 @@ impl From<MessageExceptions> for ClusterExceptions {
 impl From<tokio::task::JoinError> for ClusterExceptions {
     fn from(error: tokio::task::JoinError) -> Self {
         ClusterExceptions::TokioTaskJoinError(error)
+    }
+}
+
+impl From<NetworkExceptions> for ClusterExceptions {
+    fn from(error: NetworkExceptions) -> Self {
+        ClusterExceptions::NetworkError(error)
     }
 }
 
@@ -129,7 +139,13 @@ impl fmt::Display for ClusterExceptions {
             },
             ClusterExceptions::NodeMessagePropogationFailed { error_message } => {
                 write!(f, "Node '{}' failed to propogate messages related to request.", error_message)
-            }
+            },
+            ClusterExceptions::NetworkError (error_message ) => {
+                write!(f, "Cluster encountered network error '{}'.", error_message)
+            },
+            ClusterExceptions::RemoteNodeRequestError { error_message } => {
+                write!(f, "Node '{}' failed to propogate request.", error_message)
+            },
         }
     }
 }

@@ -1,8 +1,6 @@
 use crate::session_resources::cluster::Cluster;
 use crate::session_resources::implementation::Implementation;
-use crate::session_resources::exceptions::ClusterExceptions;
-use std::sync::Arc;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::mpsc;
 
 // Session Class
 // The session is created to manage the overall execution of client requests

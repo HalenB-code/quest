@@ -2,7 +2,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead};
 use std::fmt;
 
 use crate::session_resources::exceptions::ClusterExceptions;
@@ -10,7 +10,8 @@ use crate::session_resources::file_system::FileSystemType;
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct ClusterConfig {
-    pub working_directory: WorkingDirectory
+    pub working_directory: WorkingDirectory,
+    pub network: Network
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -19,6 +20,14 @@ pub struct WorkingDirectory {
     pub local_path: String,
     pub wal_path: String,
     pub file_system_type: FileSystemType
+}
+
+#[derive(Deserialize, Debug, Clone)]
+//#[serde(rename = "working_directory")]
+pub struct Network {
+    pub binding_address: String,
+    pub orchestrator_port: String,
+    pub layout: HashMap<String, HashMap<String, String>>,
 }
 
 impl ClusterConfig {
@@ -33,15 +42,17 @@ impl ClusterConfig {
         .collect::<Vec<String>>()
         .join("\n");
 
-        let parsed_data = parse_toml_like(&lines).unwrap();
+        // let parsed_data = parse_toml_like(&lines).unwrap();
+
+        let parsed_data: ClusterConfig = toml::from_str(&lines).unwrap();
 
         // Convert the map into JSON string (Serde supports JSON-like maps)
-        let json_str = serde_json::to_string(&parsed_data).unwrap();
+        //let json_str = serde_json::to_string(&parsed_data).unwrap();
 
         // Deserialize into Config
-        let config: ClusterConfig = serde_json::from_str(&json_str).unwrap();
+        //let config: ClusterConfig = serde_json::from_str(&json_str).unwrap();
 
-        config
+        parsed_data
 
     }
 }

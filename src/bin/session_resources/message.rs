@@ -2,9 +2,6 @@ use serde::{Serialize, Deserialize};
 use serde_json::Result;
 use std::fmt;
 use std::collections::HashMap;
-use crate::session_resources::file_system::FileSystemType;
-
-use super::exceptions::ClusterExceptions;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(untagged, rename_all = "lowercase")]
@@ -68,7 +65,7 @@ pub enum MessageType {
     },
     #[serde(rename = "broadcast_read_ok")]
     BroadcastReadOk {
-        messages: Vec<usize>
+        messages: Vec<String>
     },
     Topology {
         topology: HashMap<String, Vec<String>>
@@ -164,14 +161,34 @@ pub enum MessageType {
     #[serde(rename = "display-df")]
     DisplayDf {
         df_name: String,
-        total_rows: usize
+        total_rows: usize,
     },
     DisplayDfOk {
     },
-    #[serde(rename = "log")]
-    LogMessages {
+    #[serde(rename = "log-node")]
+    LogNodeMessages {
     },
-    LogMessagesOk {
+    LogNodeMessagesOk {
+    },
+    #[serde(rename = "log-cluster")]
+    LogClusterMessages {
+    },
+    LogClusterMessagesOk {
+    },
+    TcpConnectOk {
+        node_id: String,
+    },
+    HealthCheck{
+    },
+    HealthCheckOk {
+    },
+    TcpRequestOk {
+    },
+    TcpRequestErr {
+    },
+    RemoteConnectOk {
+    },
+    RemoteShutdown {
     }
 }
 
@@ -206,11 +223,18 @@ mod as_json_string {
 pub fn message_deserializer(input_string: &String) -> Result<Message> {
 
     match input_string.trim() {
-        "log" => Ok(Message::Request {
+        "log-cluster" => Ok(Message::Request {
             src: "system".to_string(),
-            dest: "logger".to_string(),
-            body: MessageType::LogMessages {},
+            dest: "cluster-orchestrator".to_string(),
+            body: MessageType::LogClusterMessages {},
         }),
+        "log-node" => {
+            Ok(Message::Request {
+                src: "system".to_string(),
+                dest: "node".to_string(),
+                body: MessageType::LogNodeMessages {},
+            })
+        }
         _ => serde_json::from_str(input_string)
     }
 }
@@ -259,8 +283,17 @@ impl fmt::Display for MessageType {
             MessageType::ReadFromFileOk { .. } => write!(f, "ReadFromFileOk"),
             MessageType::DisplayDf { .. } => write!(f, "DisplayDf"),
             MessageType::DisplayDfOk { .. } => write!(f, "DisplayDfOk"),
-            MessageType::LogMessages { .. } => write!(f, "LogMessages"),
-            MessageType::LogMessagesOk { .. } => write!(f, "LogMessagesOk"),  
+            MessageType::LogNodeMessages { .. } => write!(f, "LogMessages"),
+            MessageType::LogNodeMessagesOk { .. } => write!(f, "LogMessagesOk"),
+            MessageType::LogClusterMessages { .. } => write!(f, "LogMessages"),
+            MessageType::LogClusterMessagesOk { .. } => write!(f, "LogMessagesOk"),
+            MessageType::TcpConnectOk { .. } => write!(f, "TcpConnectOk"),
+            MessageType::HealthCheck { .. } => write!(f, "HealthCheck"),
+            MessageType::HealthCheckOk { .. } => write!(f, "HealthCheckOk"),
+            MessageType::TcpRequestOk { .. } => write!(f, "TcpRequestOk"),
+            MessageType::TcpRequestErr { .. } => write!(f, "TcpRequestErr"),
+            MessageType::RemoteConnectOk { .. } => write!(f, "RemoteConnectOk"),
+            MessageType::RemoteShutdown { .. } => write!(f, "RemoteShutdown"),
         }
     }
 }
@@ -286,6 +319,7 @@ pub trait MessageFields {
 
 // Trait to access fields in `MessageType`
 pub trait MessageTypeFields {
+    fn is_ok(&self) -> bool;
     fn get_type(&self) -> String;
     fn msg_id(&self) -> Option<usize>;
     fn echo(&self) -> Option<&String>;
@@ -419,6 +453,36 @@ impl MessageFields for Message {
 // Implement `MessageTypeFields` for `MessageType`
 impl MessageTypeFields for MessageType {
 
+    fn is_ok(&self) -> bool {
+        match self {
+            MessageType::EchoOk { .. } |
+            MessageType::GenerateOk { .. } |
+            MessageType::BroadcastOk { .. } |
+            MessageType::BroadcastReadOk { .. } |
+            MessageType::TopologyOk { .. } |
+            MessageType::VectorAddOk { .. } |
+            MessageType::VectorReadOk { .. } |
+            MessageType::SendOk { .. } |
+            MessageType::PollOk { .. } |
+            MessageType::CommitOffsetsOk { .. } |
+            MessageType::ListCommitedOffsetsOk { .. } |
+            MessageType::TransactionOk { .. } |
+            MessageType::KeyValueReadOk { .. } |
+            MessageType::KeyValueWriteOk { .. } |
+            MessageType::GlobalCounterReadOk { .. } |
+            MessageType::GlobalCounterWriteOk { .. } |
+            MessageType::ReadFromFileOk { .. } |
+            MessageType::DisplayDfOk { .. } |
+            MessageType::LogNodeMessagesOk { .. } |
+            MessageType::LogClusterMessagesOk { .. } |
+            MessageType::TcpConnectOk { .. } |
+            MessageType::HealthCheckOk { .. } | 
+            MessageType::TcpRequestOk { .. } |
+            MessageType::RemoteConnectOk { .. } => true,
+            _ => false
+        }  
+    }
+
     fn get_type(&self) -> String {
         match self {
             MessageType::Echo { .. } => "echo".to_string(),
@@ -457,8 +521,17 @@ impl MessageTypeFields for MessageType {
             MessageType::ReadFromFileOk { .. } => "read_from_file_ok".to_string(),
             MessageType::DisplayDf { .. } => "display_df".to_string(),
             MessageType::DisplayDfOk { .. } => "display_df_ok".to_string(),
-            MessageType::LogMessages { .. } => "log_messages".to_string(),
-            MessageType::LogMessagesOk { .. } => "log_messages_ok".to_string(),
+            MessageType::LogNodeMessages { .. } => "log_node_messages".to_string(),
+            MessageType::LogNodeMessagesOk { .. } => "log_node_messages_ok".to_string(),
+            MessageType::LogClusterMessages { .. } => "log_cluster_messages".to_string(),
+            MessageType::LogClusterMessagesOk { .. } => "log_cluster_messages_ok".to_string(),
+            MessageType::TcpConnectOk { .. } => "tcp_connect_ok".to_string(),
+            MessageType::HealthCheck { .. } => "healthcheck".to_string(),
+            MessageType::HealthCheckOk { .. } => "healthcheck_ok".to_string(),
+            MessageType::TcpRequestOk { .. } => "tcp_request_ok".to_string(),
+            MessageType::TcpRequestErr { .. } => "tcp_request_err".to_string(),
+            MessageType::RemoteConnectOk { .. } => "remote_connect_ok".to_string(),
+            MessageType::RemoteShutdown { .. } => "remote_shutdown".to_string(),
         }
     }
 
@@ -614,6 +687,8 @@ pub enum MessageExceptions {
     PollOffsetsError,
     CommitOffsetsError,
     ListCommitedOffsetsError,
+    BroadcastReadError,
+    SerializationError
 }
 
 
@@ -623,6 +698,8 @@ impl fmt::Display for MessageExceptions {
             MessageExceptions::PollOffsetsError => write!(f, "Error polling offsets"),
             MessageExceptions::CommitOffsetsError => write!(f, "Error committing offsets"),
             MessageExceptions::ListCommitedOffsetsError => write!(f, "Error list committed offsets"),
+            MessageExceptions::BroadcastReadError => write!(f, "Broadcast value error"),
+            MessageExceptions::SerializationError => write!(f, "Message serialization failed"),
         }
     }
 }

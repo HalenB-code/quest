@@ -3,7 +3,6 @@ use std::collections::{HashMap, VecDeque};
 use crate::session_resources::exceptions::ClusterExceptions;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use crate::session_resources::cluster::Cluster;
 
 #[derive(Debug, Clone)]
 pub struct Messenger {

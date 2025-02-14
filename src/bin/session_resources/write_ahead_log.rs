@@ -3,7 +3,6 @@ use std::io::{self, BufWriter, Write};
 use serde::{Serialize, Deserialize};
 
 use std::io::BufRead;
-
 use crate::session_resources::transactions::Action;
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -23,7 +22,6 @@ impl WriteAheadLog {
     pub fn new(path: &str) -> io::Result<Self> {
         let file = OpenOptions::new()
             .create(true)
-            .truncate(true)
             .append(true)
             .open(path)?;
         Ok(Self {

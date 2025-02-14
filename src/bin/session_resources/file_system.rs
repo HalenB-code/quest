@@ -1,5 +1,4 @@
 use std::fs::File;
-use std::io::{self, BufRead, Read, Write};
 use memmap2::Mmap;
 use std::collections::{HashMap, BTreeMap};
 use std::fmt;
@@ -9,11 +8,8 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::Hasher;
 use serde::Deserialize;
 
-use crate::session_resources::datastore::{DataFrame, Column, ColumnType};
-use crate::session_resources::datastore::DatastoreExceptions;
-use crate::session_resources::cluster::Cluster;
-
-use super::exceptions::ClusterExceptions;
+use crate::session_resources::datastore::{DataFrame, ColumnType};
+use crate::session_resources::exceptions::ClusterExceptions;
 
 #[derive(Debug, Clone)]
 pub struct FileSystemManager {
@@ -64,18 +60,40 @@ pub fn get_mmap(file_path: String) -> Result<Mmap, ClusterExceptions> {
     Ok(mmap)
 }
 
-pub fn read_mmap_bytes(file_handler: &[u8], row_terminator: u8, column_delimiter: u8) -> Result<HashMap<String, Vec<String>>, ClusterExceptions> {
-    let buffer = &file_handler[..];
-    Ok(structure_bytes(buffer, row_terminator, column_delimiter))
-}
 
-pub fn read_csv(node: &String, file_path: String, byte_ordinals: String, delimiter: Option<u8>) -> Result<DataFrame, ClusterExceptions> {
+pub fn read_csv(node: &String, file_path: String, byte_ordinals: String, delimiter: Option<u8>, schema: &String) -> Result<DataFrame, ClusterExceptions> {
     const LINE_TERMINATOR: u8 = 10;
 
     // Create file object and reader
     let mmap = get_mmap(file_path.clone())?;
     let get_byte_ordinals: HashMap<String, [u8;2]> = serde_json::from_str(byte_ordinals.as_str())?;
+    let file_schema: HashMap<String, ColumnType> = serde_json::from_str(schema.as_str())?;
     let get_byte_positions = get_byte_ordinals.get_key_value(node);
+
+    // Nodes that are not allocated the first line in byte_ordinals will not have file headers
+    // Supplied schema should be used for these nodes to obtain correct column names
+    let mut headers: HashMap<usize, String> = HashMap::new();
+    let schema: Option<HashMap<usize, String>>;
+
+    for (node_name, byte_positions) in &get_byte_ordinals {
+        if node_name == node {
+            // If the starting byte position for the node calling read_csv is 0 - headers will be read from the first line of the file
+            // If not, headers need to be supplied
+            if byte_positions[0] == 0 {
+                continue
+            } else {
+                for (idx, (column, column_type)) in file_schema.iter().enumerate() {
+                    headers.insert(idx, column.clone());
+                }
+            }
+        }
+    }
+
+    if headers.len() == 0 {
+        schema = None;
+    } else {
+        schema = Some(headers);
+    }
 
     if let Some(byte_positions) = get_byte_positions {
         let bytes = byte_positions.1;
@@ -92,7 +110,7 @@ pub fn read_csv(node: &String, file_path: String, byte_ordinals: String, delimit
             separator = 44 as u8;
         }
     
-        let raw_data = read_mmap_bytes(bytes_mmap, LINE_TERMINATOR, separator)?;
+        let raw_data = structure_bytes(bytes_mmap, LINE_TERMINATOR, separator, schema);
         let df = DataFrame::new(Some(raw_data));
     
         Ok(df)
@@ -103,13 +121,17 @@ pub fn read_csv(node: &String, file_path: String, byte_ordinals: String, delimit
 
 }
 
-pub fn structure_bytes(data: &[u8], row_terminator: u8, column_delimiter: u8) -> HashMap<String, Vec<String>> {
+pub fn structure_bytes(data: &[u8], row_terminator: u8, column_delimiter: u8, headers: Option<HashMap<usize, String>>) -> HashMap<String, Vec<String>> {
     // Used to store the actual values relating to each column: Col_1: [Val_1, Val_2, Val_3]
     let mut bytes: HashMap<String, Vec<String>> = HashMap::new();
+    let mut columns: HashMap<usize, String>;
 
     // Used to store index position of value for each column: 0: Col_1, 1: Col_2, 2: Col_3
-    let mut columns = HashMap::new();
-
+    match &headers {
+        Some(file_headers) => {columns = file_headers.clone()},
+        None => {columns = HashMap::new()}
+    }
+    println!("Column headers {:?}", columns);
     // Split buffer by row terminator
     for (iter, line) in data.split(|delimiter| *delimiter == row_terminator).into_iter().enumerate() {
 
@@ -118,14 +140,20 @@ pub fn structure_bytes(data: &[u8], row_terminator: u8, column_delimiter: u8) ->
 
             // Convert ASCII bytes to string
             if let Ok(ascii_line) = String::from_utf8(value.to_vec()) {
+
+                // On first line of file, only extract values as file headers if headers.is_none() = true. This means we are switching to received headers as column names
                 if iter == 0 {
-                    bytes.insert(ascii_line.clone().trim_ascii().to_string(), vec![]);
-                    columns.insert(idx, ascii_line.clone().trim_ascii().to_string());
+                    if headers.is_some() {
+                        bytes.insert(ascii_line.clone().trim_ascii().to_string(), vec![]);
+                    } else {
+                        bytes.insert(ascii_line.clone().trim_ascii().to_string(), vec![]);
+                        columns.insert(idx, ascii_line.clone().trim_ascii().to_string());
+                    }
                 }
                 else {
                     if let Some(column) = columns.get_key_value(&idx) {
                         if let Some(column_data) = bytes.get_mut(column.1) {
-                            column_data.push(ascii_line);
+                            column_data.push(ascii_line.clone().trim_ascii().to_string());
                         }
                     }
                     
@@ -251,7 +279,7 @@ impl FileSystemManager {
             }
         }
 
-        let bytes: HashMap<String, Vec<String>> = structure_bytes(&buffer[..], ROW_TERMINATOR, column_delimiter);
+        let bytes: HashMap<String, Vec<String>> = structure_bytes(&buffer[..], ROW_TERMINATOR, column_delimiter, None);
 
         let mut column_schema_return: HashMap<String, ColumnType> = HashMap::new();
         let column_schema = DataFrame::infer_type(bytes);

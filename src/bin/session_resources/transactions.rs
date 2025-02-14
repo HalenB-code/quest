@@ -1,8 +1,8 @@
 use std::fmt;
-use std::collections::{HashMap, BTreeMap, VecDeque};
+use std::collections::HashMap;
 use serde::{Serialize, Deserialize};
 use std::sync::Arc;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::Mutex;
 use serde_json;
 
 use crate::session_resources::message::{MessageFields, MessageType, MessageTypeFields, Message};
@@ -14,7 +14,8 @@ use crate::session_resources::write_ahead_log::{WalEntry, WriteAheadLog};
 pub enum TransactionTypes {
     Read,
     Write,
-    ReadFile
+    ReadFile,
+    DisplayDf
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -105,6 +106,22 @@ impl Action {
                         } 
                     } ) 
                 } );
+            },
+            TransactionTypes::DisplayDf => {
+                let df_name = steps.get(&"df_name".to_string()).unwrap().to_string();
+                let n_rows = steps.get(&"n_rows".to_string()).unwrap().to_string();
+
+                return Ok( Action { 
+                    key: TransactionTypes::DisplayDf, 
+                    value: Some( Message::Request { 
+                        src: message.src().unwrap().clone(), 
+                        dest: message.dest().unwrap().clone(), 
+                        body: MessageType::DisplayDf { 
+                            df_name,
+                            total_rows: n_rows.parse::<usize>().unwrap_or(5),
+                        } 
+                    } ) 
+                } );
             }
         }
         
@@ -135,6 +152,7 @@ impl Transaction {
         let mut action_steps: HashMap<String, String> = HashMap::new();
 
         match action_type.as_str() {
+            // First element -- i.e. action -- in list is the type (e.g. "rf")
             x if x == "r" => {
 
                 if steps.len() == 3_usize {
@@ -167,6 +185,15 @@ impl Transaction {
                     return Err(ClusterExceptions::TransactionError(TransactionExceptions::TransactionInstructionSetError));
                 }
             },
+            x if x == "display-df" => {
+                if steps.len() == 3_usize {   
+                    action_steps.insert("df_name".to_string(), steps[1].clone());
+                    action_steps.insert("n_rows".to_string(), steps[2].clone());
+                    return Ok((TransactionTypes::DisplayDf, action_steps));
+                } else {
+                    return Err(ClusterExceptions::TransactionError(TransactionExceptions::TransactionInstructionSetError));
+                }
+            },          
             _ => {
                 return Err(ClusterExceptions::TransactionError(TransactionExceptions::TransactionInstructionSetError));
             }
@@ -211,6 +238,16 @@ impl Transaction {
                 } else {
                     return Err(ClusterExceptions::TransactionError(TransactionExceptions::TransactionInstructionSetError));
                 }
+            },
+            TransactionTypes::DisplayDf => {
+                if hash_steps.len() == 3_usize {  
+                    action_steps.push("display-df".to_string());
+                    action_steps.push(hash_steps.get(&"df_name".to_string()).unwrap().to_string());
+                    action_steps.push(hash_steps.get(&"n_rows".to_string()).unwrap().to_string());
+                    return Ok(action_steps);
+                } else {
+                    return Err(ClusterExceptions::TransactionError(TransactionExceptions::TransactionInstructionSetError));
+                }
             }
         }
     }
@@ -223,6 +260,7 @@ impl Transaction {
 
             for instruction in instructions {
 
+                // Action is first element in instruction set
                 let action = &instruction.clone()[0];
 
                 let (action_type, action_steps) = self.hash_transaction_steps(action, instruction.clone())?;
@@ -257,14 +295,45 @@ impl Transaction {
                     },
                     TransactionTypes::ReadFile => {                 
                         let byte_ordinals: HashMap<String, (usize, usize)> = serde_json::from_str(&instruction[3])?;
+
+                        // byte_ordinals will contain all nodes so loop here will create a separate request for each
                         for (node, _bytes) in byte_ordinals.clone().into_iter() {
-                            if let Ok(built_action) = Action::build(TransactionTypes::ReadFile, &action_steps, transaction_request.clone(), Some(node)) {
+                            let mut updated_message_request = transaction_request.clone();
+                            // Update destination node to route transaction actions across network
+                            updated_message_request.set_dest(node.clone());
+                            if let Ok(built_action) = Action::build(TransactionTypes::ReadFile, &action_steps, updated_message_request, Some(node)) {
                                 self.actions.push(built_action);
                             } else {
                                 return Err(ClusterExceptions::TransactionError(TransactionExceptions::TransactionInstructionSetError));
                             }
                         };
-                        
+                    },
+                    TransactionTypes::DisplayDf => {
+                        let mut all_nodes: Vec<String> = vec![];
+                        if let Some(first_node) = transaction_request.dest() {
+                            all_nodes.push(first_node.clone());
+
+                            // Only extend all_nodes with elements from other_nodes if other_nodes contains additional node_ids than first_node
+                            // get_nodes() is the function call that produces param other_nodes so if "n1" is the only node, it will appear
+                            // first in transaction_request.dest() and then in other_nodes as we do not filter the return list when calling other_nodes
+                            if other_nodes.iter().filter(|x| *x != first_node).map(|x| x.to_string()).collect::<Vec<String>>().len() > 0 {
+                                all_nodes.extend(other_nodes.clone());
+                            }
+                            
+                        } else {
+                            return Err(ClusterExceptions::TransactionError(TransactionExceptions::TransactionInstructionSetError));
+                        }
+                        for node in all_nodes.clone().into_iter() {
+                            let mut updated_message_request = transaction_request.clone();
+
+                            // Update destination node to route transaction actions across network
+                            updated_message_request.set_dest(node.clone());
+                            if let Ok(built_action) = Action::build(TransactionTypes::DisplayDf, &action_steps, updated_message_request, None) {
+                                self.actions.push(built_action);
+                            } else {
+                                return Err(ClusterExceptions::TransactionError(TransactionExceptions::TransactionInstructionSetError));
+                            }
+                        };
                     }
                 }
             }
