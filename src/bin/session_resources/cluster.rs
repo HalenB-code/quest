@@ -42,7 +42,7 @@ pub struct Cluster {
 }
   
 impl Cluster {
-  pub fn create(cluster_reference: usize, outgoing_message_handler: mpsc::Sender<String>, incoming_message_handler: mpsc::Receiver<String>, execution_target: MessageExecutionType, source_path: String) -> Self {
+  pub fn create(cluster_reference: usize, outgoing_message_handler: mpsc::Sender<String>, incoming_message_handler: mpsc::Receiver<String>, execution_target: MessageExecutionType, source_path: String, establish_network: bool) -> Self {
 
     let cluster_config = ClusterConfig::read_config(source_path);
     let wal_path = &cluster_config.working_directory.wal_path;
@@ -59,7 +59,7 @@ impl Cluster {
       transaction_manager: TransactionManager::new(wal_path.clone().as_str()),
       cluster_configuration: cluster_config.clone(),
       file_system_manager: FileSystemManager::new(file_system_accessibility),
-      network_manager: NetworkManager::new(network_layout, outgoing_message_handler)
+      network_manager: NetworkManager::new(network_layout, outgoing_message_handler, cluster_config.working_directory.local_path, establish_network)
     }
   }
 
@@ -108,6 +108,7 @@ impl Cluster {
         false => {
             let mut node = Node::create(&init_request_message, &self.cluster_configuration.working_directory.local_path).await;
             let node_id = node.node_id.clone();
+            self.network_manager.network_map.insert(node_id.clone(), ("".to_string(), NodeType::Local));
 
             // Store the new node in the cluster
             self.nodes
@@ -160,47 +161,47 @@ impl Cluster {
 
   pub async fn process_local(&mut self, message_id: usize, message_request: Message) -> Result<(), ClusterExceptions> {
 
-  match message_request {
+    match message_request {
 
-    Message::Init { .. } => {
-        if let Err(error) = self.process_initialization(message_request).await {
-          self.update_message_log(message_id, MessageStatus::Failed).await?;
-          return Err(error);
-        } else {
-          self.update_message_log(message_id, MessageStatus::Ok).await?;
-          return Ok(());
-        };
-    },
-    Message::Request { .. } => {
-      match message_request.msg_type().unwrap().as_str() {
-        "txn" => {
-          if let Err(error) = self.categorize_and_queue_transactions(message_request).await {
+      Message::Init { .. } => {
+          if let Err(error) = self.process_initialization(message_request).await {
             self.update_message_log(message_id, MessageStatus::Failed).await?;
             return Err(error);
           } else {
             self.update_message_log(message_id, MessageStatus::Ok).await?;
             return Ok(());
           };
-        },
-        _ => {
-          
-          if let Err(error) = self.messenger.request_queue(message_request).await {
-            self.update_message_log(message_id, MessageStatus::Failed).await?;
-            return Err(error);
-          } else {
-            self.update_message_log(message_id, MessageStatus::Ok).await?;
-            return Ok(());
-          };
+      },
+      Message::Request { .. } => {
+        match message_request.msg_type().unwrap().as_str() {
+          "txn" => {
+            if let Err(error) = self.categorize_and_queue_transactions(message_request).await {
+              self.update_message_log(message_id, MessageStatus::Failed).await?;
+              return Err(error);
+            } else {
+              self.update_message_log(message_id, MessageStatus::Ok).await?;
+              return Ok(());
+            };
+          },
+          _ => {
+            
+            if let Err(error) = self.messenger.request_queue(message_request).await {
+              self.update_message_log(message_id, MessageStatus::Failed).await?;
+              return Err(error);
+            } else {
+              self.update_message_log(message_id, MessageStatus::Ok).await?;
+              return Ok(());
+            };
+          }
+
         }
-
+      },
+      Message::Response { .. } => {
+        return Err(ClusterExceptions::UnkownClientRequest {
+          error_message: message_request.dest().unwrap().to_string(),
+        });
       }
-    },
-    Message::Response { .. } => {
-      return Err(ClusterExceptions::UnkownClientRequest {
-        error_message: message_request.dest().unwrap().to_string(),
-      });
     }
-  }
   }
 
   pub async fn poll_remote_responses(&self) -> Result<Message, ClusterExceptions> {
@@ -258,8 +259,9 @@ impl Cluster {
       message_request.set_msg_id(message_id);
     }
 
-    match message_request.dest().unwrap().as_str() {
-      "cluster-orchestrator" => {
+    match message_request.dest() {
+      None => {
+        println!("{:?}", message_request.msg_type().unwrap());
         match message_request.msg_type().unwrap().as_str() {
           "log_cluster_messages" => {
             
@@ -273,12 +275,16 @@ impl Cluster {
               self.cluster_response(message_response)?;
             }            
           },
+          "init" => {
+            self.process_local(message_id, message_request).await?;
+          }
           _ => {
           }
         }
       },
-      _ => {
-        if let Some((node, node_type)) = self.network_manager.network_map.get(message_request.dest().unwrap()) {
+      Some(_destination) => {
+        if let Some((_node, node_type)) = self.network_manager.network_map.get(message_request.dest().unwrap()) {
+
           match node_type {
             NodeType::Local => {
               self.process_local(message_id, message_request).await?;
@@ -290,7 +296,6 @@ impl Cluster {
         }
       }
     }
-
 
     Ok(())
   }

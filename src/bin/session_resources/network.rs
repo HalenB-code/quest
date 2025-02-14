@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::fmt;
+use std::net::TcpListener;
 use tokio::sync::mpsc;
 
 use std::io::{Read, Write};
@@ -8,6 +9,7 @@ use std::net::TcpStream;
 use tokio::sync::broadcast;
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use std::process::Command;
 
 use crate::session_resources::config::Network;
 use crate::session_resources::message::{self, Message, MessageExceptions};
@@ -28,7 +30,8 @@ pub struct NetworkManager {
     pub remote_sending_channel: Arc<Mutex<broadcast::Sender<Message>>>,
     pub remote_receiver_channel: Arc<Mutex<broadcast::Receiver<Message>>>,
     pub network_map: HashMap<String, (String, NodeType)>,
-    pub shuffle_pattern: ShuffleType
+    pub shuffle_pattern: ShuffleType,
+    pub local_path: String
 }
 
 #[derive(Debug, Clone)]
@@ -47,7 +50,7 @@ impl fmt::Display for NodeType {
 }
 
 impl NetworkManager {
-    pub fn new(network_config: &Network, cluster_sending_channel: mpsc::Sender<String>) -> Self {
+    pub fn new(network_config: &Network, cluster_sending_channel: mpsc::Sender<String>, local_path: String, establish_network: bool) -> Self {
         let mut layout = HashMap::new();
         let binding_address = network_config.clone().binding_address;
         let orchestrator_port = network_config.clone().orchestrator_port;
@@ -56,29 +59,34 @@ impl NetworkManager {
         for (idx, node) in network_config.clone().layout {
 
             if let Some(node_name) = node.get("name") {
-                match node_name.as_str() {
-                    "local" => {
-                        layout.insert(node_name.to_string(), (format!("{}:{}", binding_address, node.get("port").unwrap()), NodeType::Local));
-                    },
-                    _ => {
-                        layout.insert(node_name.to_string(), (format!("{}:{}", binding_address, node.get("port").unwrap()), NodeType::Remote));
+
+                // if establish_network = true, use naming convention from config.toml to determine whether node is local/remote
+                if establish_network {
+                    match node_name.as_str() {
+                        "local" => {
+                            layout.insert(node_name.to_string(), (format!("{}:{}", binding_address, node.get("port").unwrap()), NodeType::Local));
+                        },
+                        _ => {
+                            layout.insert(node_name.to_string(), (format!("{}:{}", binding_address, node.get("port").unwrap()), NodeType::Remote));
+                        }
                     }
-                }
+                // If establish_network = false, then all nodes are treated as local 
+                } else {
+                    continue
+                 }
+
             }
         }
 
-        let mut connections = HashMap::new();
-        println!("{:?}", format!("{}:{}", binding_address, orchestrator_port));
-        connections.insert("cluster-orchestrator".to_string(), Arc::new(Mutex::new(TcpStream::connect(format!("{}:{}", binding_address, orchestrator_port)).unwrap())));
-
         Self {
             cluster_address: format!("{}:{}", binding_address, orchestrator_port),
-            connections,
+            connections: HashMap::new(),
             cluster_sending_channel,
             remote_sending_channel: Arc::new(Mutex::new(sender)),
             remote_receiver_channel: Arc::new(Mutex::new(receiver)),
             network_map: layout,
-            shuffle_pattern: ShuffleType::Ring
+            shuffle_pattern: ShuffleType::Ring,
+            local_path
         }
     }
 
@@ -103,21 +111,35 @@ impl NetworkManager {
     }
 
     pub async fn create_network(&mut self) -> Result<(), ClusterExceptions> {
-                // TODO
-        // SSH and binary file placement on remote file system
-        // For now we assume this is inplace
 
-        for (node, (address, node_type)) in self.network_map.clone() {
-            match node_type {
-                NodeType::Local => {
-                    // This channel is local and will be read by local nodes
-                    self.cluster_sending_channel.send(format!(r#"{{"type":"init","msg_id":999,"node_id":"{node}","node_ids":[]}}"#)).await;
-                    
-                },
-                NodeType::Remote => {
-                    self.establish_remote_connection(node.to_string())?;
+        // Sequence of TCP connections follows: 
+        // 1_ Cluster listener at cluster_address established
+        // 2_ node initiation occurs, establishing node listener and stream connection with cluster_address the reciprocal
+        // 3_ with node listener up, establish stream connection cluster side and store in connections
+
+
+        if let Ok(_listener) = TcpListener::bind(self.cluster_address.clone()) {
+
+            for (node, (address, node_type)) in self.network_map.clone() {
+                match node_type {
+                    NodeType::Local => {
+                        // This channel is local and will be read by local nodes
+                        self.cluster_sending_channel.send(format!(r#"{{"type":"init","msg_id":999,"node_id":"{node}","node_ids":[]}}"#)).await;
+                        
+                    },
+                    NodeType::Remote => {
+                        if let Ok(()) = self.remote_node_initiate(&self.cluster_address, &node, &address, &self.local_path) {
+                                self.establish_remote_connection(node.to_string());
+                                println!("{} connected", node);
+                                
+                        } else {
+                            return Err(ClusterExceptions::NetworkError(NetworkExceptions::TcpStreamError { error_message: format!("failed to establish tcp connection on node {}", node) }));
+                        }
+                    }
                 }
             }
+        } else {
+            return Err(ClusterExceptions::NetworkError(NetworkExceptions::TcpStreamError { error_message: "failed to establish tcp connection on node {}".to_string() }));
         }
 
         Ok(())
@@ -149,6 +171,23 @@ impl NetworkManager {
 
     pub fn get_connection(&self, id: &str) -> Option<Arc<Mutex<TcpStream>>> {
         self.connections.get(id).cloned()
+    }
+
+    pub fn remote_node_initiate(&self, cluster_bind_address: &String, node_id: &String, node_bind_address: &String, local_path: &String) -> Result<(), ClusterExceptions> {
+
+        let node_initiate = Command::new(r"C:\rust\projects\rust-bdc\target\debug\node_client.exe")
+        .arg(cluster_bind_address)
+        .arg(node_id)// node_id
+        .arg(node_bind_address) // node bind address
+        .arg(local_path) // local path
+        .output();
+
+        if let Ok(output) = node_initiate {
+            Ok(())
+        } else {
+            Err(ClusterExceptions::RemoteNodeRequestError { error_message: "initiate exe failed".to_string() })
+        }
+  
     }
 
 }

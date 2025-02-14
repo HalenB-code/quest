@@ -116,7 +116,7 @@ pub enum NodeRoleType {
     pub async fn process_requests(&mut self, message_execution_type: MessageExecutionType, cluster: &Arc<Mutex<Cluster>>) -> Result<(), ClusterExceptions> {
 
         loop {
-
+    
             if let Some(message) = cluster.lock().await.messenger.dequeue().await {
                 let messeage_execution = self.execute(&message_execution_type, message).await?;
 
