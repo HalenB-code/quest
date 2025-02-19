@@ -40,3 +40,8 @@
 {"TransactionStart":{"transaction_id":1}}
 {"ActionLog":{"transaction_id":1,"node":"cluster-orchestrator","action":{"key":"DisplayDf","value":{"src":"cluster-orchestrator","dest":"n1","body":{"type":"display-df","df_name":"df_keyvalue","total_rows":5}}}}}
 {"TransactionCommit":{"transaction_id":1}}
+{"TransactionStart":{"transaction_id":1}}
+{"ActionLog":{"transaction_id":1,"node":"cluster-orchestrator","action":{"key":"DisplayDf","value":{"src":"cluster-orchestrator","dest":"node-1","body":{"type":"display-df","df_name":"df_broadcast","total_rows":5}}}}}
+{"ActionLog":{"transaction_id":1,"node":"cluster-orchestrator","action":{"key":"DisplayDf","value":{"src":"cluster-orchestrator","dest":"node-1","body":{"type":"display-df","df_name":"df_broadcast","total_rows":5}}}}}
+{"ActionLog":{"transaction_id":1,"node":"cluster-orchestrator","action":{"key":"DisplayDf","value":{"src":"cluster-orchestrator","dest":"node-2","body":{"type":"display-df","df_name":"df_broadcast","total_rows":5}}}}}
+{"TransactionCommit":{"transaction_id":1}}

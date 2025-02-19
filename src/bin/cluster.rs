@@ -3,6 +3,11 @@ use std::io;
 use crate::session_resources::implementation::{MessageExecutionType, Implementation};
 use crate::session_resources::cluster::Cluster;
 use crate::session_resources::session::Session;
+use crate::session_resources::message::Message;
+use crate::session_resources::network;
+use crate::session_resources::message;
+use std::any::Any;
+
 use tokio::sync::mpsc;
 use std::env;
 
@@ -16,13 +21,23 @@ async fn main() {
   let implementation: Implementation = Implementation::EAGER;
   let message_execution_target = MessageExecutionType::StdOut;
   let (tx, rx) = mpsc::channel::<String>(100);
+  let (network_sender, network_receiver) = mpsc::channel::<Message>(100);
 
-  let mut cluster: Cluster = Cluster::create(1, tx.clone(), rx, message_execution_target, source_path, establish_network);
+  let mut cluster: Cluster = Cluster::create(1, tx.clone(), rx, message_execution_target, source_path, establish_network, network_sender.clone());
 
   if establish_network {
-    // Establish node network
-    cluster.network_manager.create_network().await;
+      match cluster.network_manager.create_network().await {
+          Ok(()) => {
+            println!("Network up");
+          }
+          Err(error) => {
+              println!("Error erecting network {:?}", error);
+          }
+      }
   }
+
+  let network_connections = cluster.network_manager.connections.clone();
+  tokio::spawn(network::start_network_workers(network_connections, network_receiver));
 
   // TODO
   // Establish network here
@@ -50,7 +65,6 @@ async fn main() {
             tx.send(request.to_string()).await;
           }
         }
-
       },
       Err(error) => eprintln!("Error reading from STDIN {error}"),
     }

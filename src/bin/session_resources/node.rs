@@ -118,32 +118,44 @@ pub enum NodeRoleType {
         loop {
     
             if let Some(message) = cluster.lock().await.messenger.dequeue().await {
+
                 let messeage_execution = self.execute(&message_execution_type, message).await?;
+                let mut propagation_message_handles = Vec::new();
 
-                if messeage_execution.len() > 0 {
-                    let mut propagation_message_handles = Vec::new();
-    
-                    for propagate_message in messeage_execution {
-                        let cluster_clone = Arc::clone(cluster);
-    
-                        // Spawn an async task for each propagation
-                        let handle = tokio::spawn(async move {
-                            if let Err(e) = cluster_clone.lock().await.propagate_message(propagate_message).await {
-                                eprintln!("Propagation failed: {:?}", e);
-                            }
-                        });
-                        propagation_message_handles.push(handle);
-                    }
+                for message_response in messeage_execution {
 
+                    match message_response {
+                        // messeage_execution will return either single response or combination of response and follow-up requests
+                        // Only propogate follow-ups requests
+                        Message::Request { .. } => {
+
+                            let cluster_clone = Arc::clone(cluster);
+    
+                            // Spawn an async task for each propagation
+                            let handle = tokio::spawn(async move {
+                                if let Err(e) = cluster_clone.lock().await.propagate_message(message_response).await {
+                                    eprintln!("Propagation failed: {:?}", e);
+                                }
+                            });
+                            propagation_message_handles.push(handle);
+
+                        },
+                        _ => {
+                            continue;
+                        }
+                    };
+                }
+
+                if propagation_message_handles.len() > 0 {
                     for handle in propagation_message_handles {
                         if let Err(e) = handle.await {
                             eprintln!("Propagation task failed: {:?}", e);
                         }
                     }
                 }
-            };
-        }
-
+            }
+        };
+    
     }
 
 
@@ -616,6 +628,18 @@ pub enum NodeRoleType {
         }
   
         Ok(())
-      }
+    }
+
+    pub async fn insert_log_message(&mut self, message: Message) -> Result<(), ClusterExceptions> {
+        let message_id = self.node_message_log_id().await;
+        let mut node_message_log_lock = self.message_record.lock().await;
+
+        if let Some(_insert) = node_message_log_lock.insert(message_id, message) {
+            return Ok(());
+        }
+        else {
+            return Err(ClusterExceptions::MessageError(MessageExceptions::NodeLogMessageError))
+        }
+    }
 
 }

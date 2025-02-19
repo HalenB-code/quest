@@ -688,7 +688,8 @@ pub enum MessageExceptions {
     CommitOffsetsError,
     ListCommitedOffsetsError,
     BroadcastReadError,
-    SerializationError
+    SerializationError,
+    NodeLogMessageError
 }
 
 
@@ -700,6 +701,7 @@ impl fmt::Display for MessageExceptions {
             MessageExceptions::ListCommitedOffsetsError => write!(f, "Error list committed offsets"),
             MessageExceptions::BroadcastReadError => write!(f, "Broadcast value error"),
             MessageExceptions::SerializationError => write!(f, "Message serialization failed"),
+            MessageExceptions::NodeLogMessageError => write!(f, "Node message log failure"),
         }
     }
 }

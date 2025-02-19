@@ -12,6 +12,7 @@ use super::network::NetworkExceptions;
 pub enum ClusterExceptions {
     IOError(io::Error),
     JsonError(serde_json::Error),
+    RemoteSendError(tokio::sync::mpsc::error::SendError<String>),
     NodeDoesNotExist { error_message: String },
     NodeAlreadyAttachedToCluster { error_message: String },
     FailedToRemoveNodeFromCluster { error_message: String },
@@ -51,6 +52,11 @@ impl From<serde_json::Error> for ClusterExceptions {
     }
 }
 
+impl From<tokio::sync::mpsc::error::SendError<String>> for ClusterExceptions {
+    fn from(error: tokio::sync::mpsc::error::SendError<String>) -> Self {
+        ClusterExceptions::RemoteSendError(error)
+    }
+}
 impl From<MessageExceptions> for ClusterExceptions {
     fn from(error: MessageExceptions) -> Self {
         ClusterExceptions::MessageError(error)
@@ -74,6 +80,7 @@ impl fmt::Display for ClusterExceptions {
         match self {
             ClusterExceptions::IOError(error_message) => write!(f, "IO error occurred: {}", error_message),
             ClusterExceptions::JsonError(error_message) => write!(f, "JSON error occurred: {}", error_message),
+            ClusterExceptions::RemoteSendError(error_message) => write!(f, "TCP send error occurred: {}", error_message),
             ClusterExceptions::NodeDoesNotExist{ error_message } => {
                 write!(f, "Node '{}' does not exist. Please init node and try again.", error_message)
             },
