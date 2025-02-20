@@ -186,6 +186,9 @@ pub enum MessageType {
     },
     TcpRequestErr {
     },
+    #[serde(rename = "remote_connect")]
+    RemoteConnect {
+    },
     RemoteConnectOk {
     },
     RemoteShutdown {
@@ -292,6 +295,7 @@ impl fmt::Display for MessageType {
             MessageType::HealthCheckOk { .. } => write!(f, "HealthCheckOk"),
             MessageType::TcpRequestOk { .. } => write!(f, "TcpRequestOk"),
             MessageType::TcpRequestErr { .. } => write!(f, "TcpRequestErr"),
+            MessageType::RemoteConnect { .. } => write!(f, "RemoteConnect"),
             MessageType::RemoteConnectOk { .. } => write!(f, "RemoteConnectOk"),
             MessageType::RemoteShutdown { .. } => write!(f, "RemoteShutdown"),
         }
@@ -530,6 +534,7 @@ impl MessageTypeFields for MessageType {
             MessageType::HealthCheckOk { .. } => "healthcheck_ok".to_string(),
             MessageType::TcpRequestOk { .. } => "tcp_request_ok".to_string(),
             MessageType::TcpRequestErr { .. } => "tcp_request_err".to_string(),
+            MessageType::RemoteConnect { .. } => "remote_connect".to_string(),
             MessageType::RemoteConnectOk { .. } => "remote_connect_ok".to_string(),
             MessageType::RemoteShutdown { .. } => "remote_shutdown".to_string(),
         }

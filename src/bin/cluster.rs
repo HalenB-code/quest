@@ -21,9 +21,8 @@ async fn main() {
   let implementation: Implementation = Implementation::EAGER;
   let message_execution_target = MessageExecutionType::StdOut;
   let (tx, rx) = mpsc::channel::<String>(100);
-  let (network_sender, network_receiver) = mpsc::channel::<Message>(100);
 
-  let mut cluster: Cluster = Cluster::create(1, tx.clone(), rx, message_execution_target, source_path, establish_network, network_sender.clone());
+  let mut cluster: Cluster = Cluster::create(1, tx.clone(), rx, message_execution_target, source_path, establish_network);
 
   if establish_network {
       match cluster.network_manager.create_network().await {
@@ -35,9 +34,6 @@ async fn main() {
           }
       }
   }
-
-  let network_connections = cluster.network_manager.connections.clone();
-  tokio::spawn(network::start_network_workers(network_connections, network_receiver));
 
   // TODO
   // Establish network here

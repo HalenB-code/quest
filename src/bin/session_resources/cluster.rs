@@ -42,7 +42,7 @@ pub struct Cluster {
   
 impl Cluster {
   pub fn create(cluster_reference: usize, outgoing_message_handler: mpsc::Sender<String>, 
-    incoming_message_handler: mpsc::Receiver<String>, execution_target: MessageExecutionType, source_path: String, establish_network: bool, network_sender: mpsc::Sender<Message>) -> Self {
+    incoming_message_handler: mpsc::Receiver<String>, execution_target: MessageExecutionType, source_path: String, establish_network: bool) -> Self {
 
     let cluster_config = ClusterConfig::read_config(source_path);
     let wal_path = &cluster_config.working_directory.wal_path;
@@ -59,7 +59,7 @@ impl Cluster {
       transaction_manager: TransactionManager::new(wal_path.clone().as_str()),
       cluster_configuration: cluster_config.clone(),
       file_system_manager: FileSystemManager::new(file_system_accessibility),
-      network_manager: NetworkManager::new(network_layout, outgoing_message_handler, cluster_config.working_directory.local_path, establish_network, network_sender)
+      network_manager: NetworkManager::new(network_layout, outgoing_message_handler, cluster_config.working_directory.local_path, establish_network)
     }
   }
 
@@ -203,16 +203,31 @@ impl Cluster {
     }
   }
 
-  pub async fn poll_remote_responses(&self, remote_sender_id: &String) -> Result<Message, ClusterExceptions> {
+  pub async fn poll_remote_responses(&mut self, remote_sender_id: &String) -> Result<Message, ClusterExceptions> {
+    println!("In poll_remote");
 
-    match self.network_manager.get_connection(remote_sender_id.as_str()).await {
-      Some(cluster_tcp_stream) => {
+    match self.network_manager.network_readers.get(remote_sender_id.as_str()) {
+      Some(node_receiver) => {
+        let mut node_receiver_lock = node_receiver.lock().await;
+
         println!("Now polling for response...");
-        let mut cluster_tcp_stream_lock = Arc::clone(&cluster_tcp_stream);;
-        let return_bytes = network::tcp_read(&mut cluster_tcp_stream_lock, 5).await?;
-        println!("Return bytes {:?}", return_bytes);
-        let message_response = network::deserialize_tcp_request(&return_bytes).await?;
-        return Ok(message_response);
+        let mut response_received: bool = false;
+        let mut message_response: Message;
+
+        while !response_received {
+
+          match node_receiver_lock.recv().await {
+            Some(message) => {
+              message_response = message;
+              println!("Remote TCP responses {:?}", message_response);
+              response_received = true;
+              return Ok(message_response);
+            },
+            None => {
+            }
+          };
+        }
+        return Err(ClusterExceptions::RemoteNodeRequestError { error_message: format!("Connection not found for node {}", remote_sender_id).to_string() });
       },
       None => {
         println!("No connection to poll...");
@@ -225,22 +240,7 @@ impl Cluster {
   pub async fn process_remote(&mut self, message_id: usize, message_request: Message) -> Result<(), ClusterExceptions> {
 
     let node_id = message_request.dest().unwrap();
-    let remote_sending_channel = &self.network_manager.remote_sending_channel;
-
-    // Without this line, start_network_workers in network.rs does not pick up messages from channel
-    // let receiver_test = &self.network_manager.remote_receiver_channel.lock().await.len();
-
-    // TESTING BLOCK
-    // match remote_sending_channel.send(message_request.clone()).await {
-    //   Ok(()) => {
-    //         return Ok(());
-    //       },
-    //       Err(error) => {
-    //         println!("Send failed");
-    //         return Err(ClusterExceptions::RemoteNodeRequestError { error_message: error.to_string() });
-    //       }
-    //     };
-    //
+    let remote_sending_channel = &self.network_manager.network_sender;
 
     match remote_sending_channel.send(message_request.clone()).await {
       Ok(()) => {
@@ -256,7 +256,6 @@ impl Cluster {
                 self.update_message_log(message_id, MessageStatus::Failed).await?;
               }
             };
-            tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
             return Ok(());
           },
           Err(error) => {
@@ -399,8 +398,8 @@ impl Cluster {
 
   pub async fn process_followups(&mut self) -> Result<(), ClusterExceptions> {
 
-      let cluster_clone = self.clone();
-      let mut messenger_request_queue_lock = cluster_clone.messenger.message_responses.lock().await;
+      let cluster_messenger = self.messenger.clone();
+      let mut messenger_request_queue_lock = cluster_messenger.message_responses.lock().await;
       while let Some(response_request) = messenger_request_queue_lock.pop_front() {
         match response_request {
           Message::Init { .. } => {

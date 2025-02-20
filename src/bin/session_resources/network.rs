@@ -6,12 +6,15 @@ use std::io::{Read, Write, BufReader};
 use std::sync::Arc;
 use std::process::{Command, Child, Stdio};
 use std::any::Any;
+use std::io::ErrorKind;
 // use std::sync::{mpsc, Mutex};
 
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, Mutex};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 use tokio::time::{timeout, Duration};
+use tokio::io::Interest;
+use tokio::net::tcp::{WriteHalf, ReadHalf};
 
 use std::{thread, time};
 
@@ -19,6 +22,7 @@ use std::{thread, time};
 
 use crate::session_resources::config::Network;
 use crate::session_resources::message::{self, Message, MessageExceptions};
+use crate::session_resources::messenger;
 
 use super::exceptions::ClusterExceptions;
 use crate::session_resources::message::MessageFields;
@@ -31,9 +35,12 @@ pub enum ShuffleType {
 #[derive(Debug, Clone)]
 pub struct NetworkManager {
     pub cluster_address: String,
-    pub connections: HashMap<String, Arc<Mutex<TcpStream>>>,
-    pub cluster_sending_channel: mpsc::Sender<String>,
-    pub remote_sending_channel: mpsc::Sender<Message>,
+    pub executable_connections: HashMap<String, Arc<Child>>,
+    pub socket_connections: HashMap<String, Arc<TcpStream>>,
+    pub network_readers: HashMap<String, Arc<Mutex<mpsc::Receiver<Message>>>>,
+    pub network_writers: HashMap<String, mpsc::Sender<Message>>,
+    pub network_sender: mpsc::Sender<Message>,
+    pub network_receiver: Arc<Mutex<mpsc::Receiver<Message>>>,
     pub network_map: HashMap<String, (String, NodeType)>,
     pub shuffle_pattern: ShuffleType,
     pub local_path: String
@@ -55,10 +62,11 @@ impl fmt::Display for NodeType {
 }
 
 impl NetworkManager {
-    pub fn new(network_config: &Network, cluster_sending_channel: mpsc::Sender<String>, local_path: String, establish_network: bool, network_sending_channel: mpsc::Sender<Message>) -> Self {
+    pub fn new(network_config: &Network, cluster_sending_channel: mpsc::Sender<String>, local_path: String, establish_network: bool) -> Self {
         let mut layout = HashMap::new();
         let binding_address = network_config.clone().binding_address;
         let orchestrator_port = network_config.clone().orchestrator_port;
+        let (network_sender, network_receiver) = mpsc::channel::<Message>(100);
 
         for (idx, node) in network_config.clone().layout {
 
@@ -84,9 +92,12 @@ impl NetworkManager {
 
         Self {
             cluster_address: format!("{}:{}", binding_address, orchestrator_port),
-            connections: HashMap::new(),
-            cluster_sending_channel,
-            remote_sending_channel: network_sending_channel,
+            executable_connections: HashMap::new(),
+            socket_connections: HashMap::new(),
+            network_readers: HashMap::new(),
+            network_writers: HashMap::new(),
+            network_sender,
+            network_receiver: Arc::new(Mutex::new(network_receiver)),
             network_map: layout,
             shuffle_pattern: ShuffleType::Ring,
             local_path
@@ -134,11 +145,11 @@ impl NetworkManager {
         if let Ok(listener) = TcpListener::bind(self.cluster_address.clone()).await {
 
             // Check that the number of connections is < connections in network_map; if true, continue loop
-            let mut all_nodes_exist = {if &self.connections.len() == &self.network_map.len() { false } else { true } };
+            let mut all_nodes_exist = {if &self.executable_connections.len() == &self.network_map.len() { false } else { true } };
 
             while all_nodes_exist {
-                let (socket, addr) = listener.accept().await?;
-
+                let (mut socket, addr) = listener.accept().await?;
+                
                 if let Some((node_id, _node_client)) = address_node_lookup.get(&addr.to_string()) {
 
                     if let Some((_node_address, node_type)) = self.network_map.get(node_id) {
@@ -146,35 +157,56 @@ impl NetworkManager {
                         match node_type {
                             NodeType::Local => {
                                 // This channel is local and will be read by local nodes
-                                self.cluster_sending_channel.send(format!(r#"{{"type":"init","msg_id":999,"node_id":"{node_id}","node_ids":[]}}"#)).await?;
+                                self.network_sender.send(message::message_deserializer(&format!(r#"{{"type":"init","msg_id":999,"node_id":"{node_id}","node_ids":[]}}"#))?);
                                 
                             },
                             NodeType::Remote => {
-                                self.add_connection(node_id.clone(), socket).await;
+                                socket.set_nodelay(true)?;
+
+                                // Each node will get it's own writer task
+                                // This writer task will create a new receiver and sender channel, retaining the receiver on which to listen for new requests
+                                // returning the sender to be stored in network_writers
+
+                                // Here a new reader task is created for each node
+                                // The reader will listen for new incoming messages on the TCPStream and send them to the sending half of the channel
+                                // This receiver will then be utilised to receive new responses from nodes within the cluster context
+                                let (node_tx, node_rx) = mpsc::channel::<Message>(100);
+                                // self.network_writers.insert(node_id.clone(), node_tx);
+                                self.network_readers.insert(node_id.clone(), Arc::new(Mutex::new(node_rx)));
+                                tokio::spawn(handle_node_connection(socket, self.network_receiver.clone(), node_tx, node_id.clone()));
+                                println!("{}", format!(r#"{{"src":"cluster-orchestrator","dest":"{node_id}","body":{{"type":"remote_connect"}}}}"#));
+                                self.network_sender.send(message::message_deserializer(&format!(r#"{{"src":"cluster-orchestrator","dest":"{node_id}","body":{{"type":"remote_connect"}}}}"#))?);
+
+                                // self.add_connection(node_id.clone(), socket).await;
                                 println!("{} connected", node_id);
                             }
                         }
                     }
                 }
 
-                all_nodes_exist = if &self.connections.len() == &self.network_map.len() { false } else { true };
+                all_nodes_exist = if &self.network_readers.len() == &self.network_map.len() { false } else { true };
 
             };
             
         } else {
-            return Err(ClusterExceptions::NetworkError(NetworkExceptions::TcpStreamError { error_message: "failed to establish tcp connection on node {}".to_string() }));
+            return Err(ClusterExceptions::NetworkError(NetworkExceptions::TcpStreamError { error_message: "failed to establish tcp connection on node".to_string() }));
         }
+
+        // {
+        //     self.test_remote_connections().await?;
+        // }
+        
 
         Ok(())
 
     }
 
     pub async fn add_connection(&mut self, id: String, stream: TcpStream) {
-        self.connections.insert(id, Arc::new(Mutex::new(stream)));
+        self.socket_connections.insert(id, Arc::new(stream));
     }
 
-    pub async fn get_connection(&self, id: &str) -> Option<Arc<Mutex<TcpStream>>> {
-        self.connections.get(id).cloned()
+    pub async fn get_connection(&self, id: &str) -> Option<Arc<TcpStream>> {
+        self.socket_connections.get(id).cloned()
     }
 
     pub fn remote_node_initiate(&self, cluster_bind_address: &String, node_id: &String, node_bind_address: &String, local_path: &String) -> Result<Child, ClusterExceptions> {
@@ -194,19 +226,16 @@ impl NetworkManager {
         } else {
             return Err(ClusterExceptions::RemoteNodeRequestError { error_message: "initiate exe failed".to_string() });
         }
-  
     }
+
 
 }
 
-pub async fn start_network_workers(
-    network_layout: HashMap<String, Arc<Mutex<TcpStream>>>, 
-    mut remote_receiver_channel: tokio::sync::mpsc::Receiver<Message>
-) -> Result<(), ClusterExceptions> {
+pub async fn start_network_workers(network_layout: HashMap<String, Arc<Mutex<TcpStream>>>, mut remote_receiver_channel: tokio::sync::mpsc::Receiver<Message>) -> Result<(), ClusterExceptions> {
     println!("start_network_workers spawned, waiting for messages...");
     
     while let Some(message) = remote_receiver_channel.recv().await {
-        println!("Received message: {:?}", message); // Debugging output
+        // println!("Received message: {:?}", message); // Debugging output
 
         let node_id = message.dest().unwrap().clone();
         
@@ -228,6 +257,47 @@ pub async fn start_network_workers(
     Ok(())
 }
 
+pub async fn handle_node_connection(mut stream: TcpStream, mut recv_requests: Arc<Mutex<mpsc::Receiver<Message>>>, send_responses: mpsc::Sender<Message>, node_id: String) {
+    let mut buffer = vec![0; 1024];
+
+    loop {
+        let recv_requests_clone = Arc::clone(&recv_requests);
+        let mut recv_requests_lock = recv_requests_clone.lock().await;
+
+        tokio::select! {
+            // Handle incoming requests from the cluster
+            Some(message) = recv_requests_lock.recv() => {
+                let serialized = serialize_tcp_response(message).await.unwrap();
+                if let Err(e) = stream.write_all(&serialized.as_bytes()).await {
+                    eprintln!("Failed to send message to {}: {:?}", node_id, e);
+                    break;
+                }
+            },
+
+            // Handle incoming responses from the remote node
+            result = stream.read(&mut buffer) => {
+                match result {
+                    Ok(bytes) if bytes > 0 => {
+                        if let Ok(response) = deserialize_tcp_request(&buffer).await {
+                            // Send the response to the cluster
+                            if let Err(e) = send_responses.send(response).await {
+                                eprintln!("Failed to send response from {}: {:?}", node_id, e);
+                            }
+                        }
+                    }
+                    Ok(_) => {
+                        eprintln!("Connection closed for node {}", node_id);
+                        break;
+                    }
+                    Err(e) => {
+                        eprintln!("Read error from node {}: {:?}", node_id, e);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+}
 
 pub async fn deserialize_tcp_request(incoming_stream: &Vec<u8>) -> Result<Message, ClusterExceptions> {
     let received_bytes = incoming_stream.iter().filter(|x| **x != 0).map(|x| *x as u8).collect::<Vec<u8>>();
@@ -244,6 +314,18 @@ pub async fn deserialize_tcp_request(incoming_stream: &Vec<u8>) -> Result<Messag
 
 }
 
+pub async fn deserialize_tcp_request_string(incoming_stream: &Vec<u8>) -> Result<String, ClusterExceptions> {
+    let received_bytes = incoming_stream.iter().filter(|x| **x != 0).map(|x| *x as u8).collect::<Vec<u8>>();
+
+    if let Ok(return_string) = String::from_utf8(received_bytes.to_vec()) {
+            return Ok(return_string);
+    } else {
+        return Err(ClusterExceptions::MessageError(MessageExceptions::SerializationError));
+    }
+
+}
+
+
 pub async fn serialize_tcp_response(response: Message) -> Result<String, ClusterExceptions> {
 
     if let Ok(message_response) = message::message_serializer(&response) {
@@ -259,6 +341,7 @@ pub async fn tcp_write(outgoing_stream: Arc<tokio::sync::Mutex<TcpStream>>, resp
     if let Err(error) = outgoing_stream.write_all(response_string.as_bytes()).await {
         return Err(ClusterExceptions::IOError(error));
     } else {
+        outgoing_stream.flush();
         return Ok(());
     }
 
@@ -270,7 +353,7 @@ pub async fn tcp_read(stream: &mut Arc<tokio::sync::Mutex<tokio::net::TcpStream>
     let mut buf_reader = tokio::io::BufReader::new(reader);
     let mut buffer = vec![0; 1024];
 
-    match timeout(Duration::from_secs(max_timeout_seconds as u64), buf_reader.read(&mut buffer)).await {
+    match timeout(Duration::from_secs(max_timeout_seconds as u64), buf_reader.read_exact(&mut buffer)).await {
         Ok(_count) => {
             return Ok(buffer)
         },
@@ -285,18 +368,20 @@ pub async fn node_tcp_write(outgoing_stream: &mut tokio::net::TcpStream, respons
     if let Err(error) = outgoing_stream.write_all(response_string.as_bytes()).await {
         return Err(ClusterExceptions::IOError(error));
     } else {
+        outgoing_stream.flush();
         return Ok(());
     }
 
 }
 
 pub async fn node_tcp_read(incoming_stream: &mut tokio::net::TcpStream) -> Result<Vec<u8>, ClusterExceptions> {
+    let mut buf_reader = tokio::io::BufReader::new(incoming_stream);
 
-    let mut bytes: Vec<u8> = Vec::with_capacity(250);
+    let mut buffer: Vec<u8> = Vec::with_capacity(1024);
 
-    match incoming_stream.read_to_end(&mut bytes).await {
+    match buf_reader.read_exact(&mut buffer).await {
         Ok(_count) => {
-            return Ok(bytes)
+            return Ok(buffer)
         },
         Err(error) => {
             return Err(ClusterExceptions::NetworkError(NetworkExceptions::TcpStreamError { error_message: error.to_string() }));
@@ -323,3 +408,30 @@ impl fmt::Display for NetworkExceptions {
         }
     }
 }
+
+// pub async fn test_remote_connections(&mut self) -> Result<(), ClusterExceptions> {
+//     for (node, connection) in &self.connections {
+//         for i in 0..1 {
+//             let mut remote_connection = connection.lock().await;
+
+//             //println!("Linger {:?} No delay {:?} Read {:?} Read {:?}", remote_connection.linger(), remote_connection.nodelay(), remote_connection.ready(Interest::READABLE).await, remote_connection.ready(Interest::WRITABLE).await);
+
+//             if let Ok(return_bytes) = node_tcp_read(&mut remote_connection, 2).await {
+//                 match deserialize_tcp_request(&return_bytes).await {
+//                     Ok(message) => {
+//                         println!("In {:?}", message);
+//                     },
+//                     Err(_error) => {
+//                         if i == 1 {
+//                             println!("Failed to confirm connection for {}", node);
+//                             return Err(ClusterExceptions::NetworkError(NetworkExceptions::FailedToReceiveResponse { error_message: "RemoteConnectOk not received".to_string() }))
+//                         }
+//                     }
+//                 }
+//             } 
+//         }
+//     }
+
+//     Ok(())
+
+// }

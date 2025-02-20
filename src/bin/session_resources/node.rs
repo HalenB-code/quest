@@ -170,6 +170,14 @@ pub enum NodeRoleType {
         // Move the message response generation logic to Message
         match message.body() {
             Some(message_type) => match *message_type {
+            MessageType::RemoteConnect { .. } => {
+                message_response = Message::Response {
+                    src: message.dest().unwrap().to_string(),
+                    dest: message.src().unwrap().to_string(),
+                    body: MessageType::RemoteConnectOk {  
+                    }
+                };
+            },
             MessageType::Echo { .. } => {
                 message_response = Message::Response {
                     src: message.dest().unwrap().to_string(),

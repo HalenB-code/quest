@@ -5,9 +5,10 @@ use crate::session_resources::node::Node;
 use crate::session_resources::network::{self, node_tcp_read};
 use crate::session_resources::message;
 
+use tokio::net::TcpSocket;
 use std::env;
 use std::sync::Arc;
-use tokio::net::{TcpStream, TcpSocket};
+use std::net::TcpStream;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::Mutex;
 
@@ -38,7 +39,7 @@ async fn main() -> std::io::Result<()> {
     local_socket.bind(bind_address.parse().expect("Valid IPV4 address"))?;
 
     let cluster_tcp_connection = local_socket.connect(cluster_address.parse().expect("Valid IPV4 address")).await;
-
+    
     // Generate RemoteConnectOk response once cluster_stream connected
     let message_response = Message::Response {
         src: node_id.to_string(),
@@ -51,6 +52,8 @@ async fn main() -> std::io::Result<()> {
     let node: Node = Node::create(&init_message, &local_path).await;
 
     if let Ok(mut cluster_stream) = cluster_tcp_connection {
+        cluster_stream.set_nodelay(true)?;
+
         if let Ok(message_response_serialized) = network::serialize_tcp_response(message_response).await {
             match network::node_tcp_write(&mut cluster_stream, message_response_serialized).await {
                 Ok(()) => {
@@ -60,6 +63,8 @@ async fn main() -> std::io::Result<()> {
                     eprintln!("{:?}", error);
                 }
             }
+        } else {
+            eprintln!("Failed to serialize response");
         };
 
         // loop {
@@ -106,7 +111,7 @@ async fn main() -> std::io::Result<()> {
                                             for response_message in response_messages {
                                                 let _ = node.insert_log_message(request.clone()).await;
                                                 if let Ok(response_string) = network::serialize_tcp_response(response_message).await {
-                                                    if let Err(e) = writer.write_all(response_string.as_bytes()).await {
+                                                    if let Err(e) = writer.write(response_string.as_bytes()).await {
                                                         eprintln!("Failed to write to stream: {}", e);
                                                     }
                                                 }
@@ -118,14 +123,14 @@ async fn main() -> std::io::Result<()> {
                         }
                     } else {
                         println!("No bytes");
-                        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+                        // tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
                         continue;
                     }
 
                 },
                 Err(error) => {eprintln!("Failed to read from stream: {}", error)}
             };
-            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+            // tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
         }
     }
     println!("Main done!");
