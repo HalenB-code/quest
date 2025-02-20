@@ -54,18 +54,18 @@ async fn main() -> std::io::Result<()> {
     if let Ok(mut cluster_stream) = cluster_tcp_connection {
         cluster_stream.set_nodelay(true)?;
 
-        if let Ok(message_response_serialized) = network::serialize_tcp_response(message_response).await {
-            match network::node_tcp_write(&mut cluster_stream, message_response_serialized).await {
-                Ok(()) => {
-                    println!("Hi from {}", node_id);
-                },
-                Err(error) => {
-                    eprintln!("{:?}", error);
-                }
-            }
-        } else {
-            eprintln!("Failed to serialize response");
-        };
+        // if let Ok(message_response_serialized) = network::serialize_tcp_response(message_response).await {
+        //     match network::node_tcp_write(&mut cluster_stream, message_response_serialized).await {
+        //         Ok(()) => {
+        //             println!("Hi from {}", node_id);
+        //         },
+        //         Err(error) => {
+        //             eprintln!("{:?}", error);
+        //         }
+        //     }
+        // } else {
+        //     eprintln!("Failed to serialize response");
+        // };
 
         // loop {
         //     println!("Yo");
@@ -113,6 +113,9 @@ async fn main() -> std::io::Result<()> {
                                                 if let Ok(response_string) = network::serialize_tcp_response(response_message).await {
                                                     if let Err(e) = writer.write(response_string.as_bytes()).await {
                                                         eprintln!("Failed to write to stream: {}", e);
+                                                    } else {
+                                                        writer.flush().await?;
+                                                        println!("Response posted to TCPStream");
                                                     }
                                                 }
                                             }

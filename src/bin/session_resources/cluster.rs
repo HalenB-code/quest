@@ -18,6 +18,8 @@ use std::fmt::Debug;
 use std::fs::File;
 use std::io::Write;
 use std::io;
+use tokio::time::{timeout, Duration};
+use tokio::sync::mpsc::Receiver;
 
 use super::message::MessageTypeFields;
 
@@ -203,39 +205,47 @@ impl Cluster {
     }
   }
 
-  pub async fn poll_remote_responses(&mut self, remote_sender_id: &String) -> Result<Message, ClusterExceptions> {
-    println!("In poll_remote");
-
-    match self.network_manager.network_readers.get(remote_sender_id.as_str()) {
-      Some(node_receiver) => {
-        let mut node_receiver_lock = node_receiver.lock().await;
-
-        println!("Now polling for response...");
-        let mut response_received: bool = false;
-        let mut message_response: Message;
-
-        while !response_received {
-
-          match node_receiver_lock.recv().await {
-            Some(message) => {
-              message_response = message;
-              println!("Remote TCP responses {:?}", message_response);
-              response_received = true;
-              return Ok(message_response);
-            },
-            None => {
-            }
-          };
-        }
-        return Err(ClusterExceptions::RemoteNodeRequestError { error_message: format!("Connection not found for node {}", remote_sender_id).to_string() });
-      },
-      None => {
-        println!("No connection to poll...");
-        return Err(ClusterExceptions::RemoteNodeRequestError { error_message: format!("Connection not found for node {}", remote_sender_id).to_string() });
+  pub async fn poll_remote_responses(
+      &mut self,
+      remote_sender_id: &String,
+  ) -> Result<Message, ClusterExceptions> {
+      println!("In poll_remote");
+  
+      match self.network_manager.network_readers.get(remote_sender_id.as_str()) {
+          Some(node_receiver) => {
+              println!("Now polling for response...");
+              let mut node_receiver_lock = node_receiver.lock().await;
+  
+              // Wait for a response with a timeout
+              match timeout(Duration::from_secs(5), node_receiver_lock.recv()).await {
+                  Ok(Some(message)) => {
+                      println!("Remote TCP response: {:?}", message);
+                      return Ok(message);
+                  }
+                  Ok(None) => {
+                      return Err(ClusterExceptions::RemoteNodeRequestError {
+                          error_message: format!("Channel closed for node {}", remote_sender_id),
+                      });
+                  }
+                  Err(_) => {
+                      return Err(ClusterExceptions::RemoteNodeRequestError {
+                          error_message: format!(
+                              "Timeout while waiting for response from node {}",
+                              remote_sender_id
+                          ),
+                      });
+                  }
+              }
+          }
+          None => {
+              println!("No connection to poll...");
+              return Err(ClusterExceptions::RemoteNodeRequestError {
+                  error_message: format!("Connection not found for node {}", remote_sender_id),
+              });
+          }
       }
-    };
-
   }
+  
 
   pub async fn process_remote(&mut self, message_id: usize, message_request: Message) -> Result<(), ClusterExceptions> {
 

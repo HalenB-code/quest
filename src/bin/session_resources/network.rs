@@ -35,6 +35,7 @@ pub enum ShuffleType {
 #[derive(Debug, Clone)]
 pub struct NetworkManager {
     pub cluster_address: String,
+    pub cluster_sending_channel: mpsc::Sender<String>,
     pub executable_connections: HashMap<String, Arc<Child>>,
     pub socket_connections: HashMap<String, Arc<TcpStream>>,
     pub network_readers: HashMap<String, Arc<Mutex<mpsc::Receiver<Message>>>>,
@@ -92,6 +93,7 @@ impl NetworkManager {
 
         Self {
             cluster_address: format!("{}:{}", binding_address, orchestrator_port),
+            cluster_sending_channel,
             executable_connections: HashMap::new(),
             socket_connections: HashMap::new(),
             network_readers: HashMap::new(),
@@ -157,8 +159,9 @@ impl NetworkManager {
                         match node_type {
                             NodeType::Local => {
                                 // This channel is local and will be read by local nodes
-                                self.network_sender.send(message::message_deserializer(&format!(r#"{{"type":"init","msg_id":999,"node_id":"{node_id}","node_ids":[]}}"#))?);
-                                
+                                if let Err(error) = self.cluster_sending_channel.send(format!(r#"{{"type":"init","msg_id":999,"node_id":"{node_id}","node_ids":[]}}"#)).await {
+                                    println!("Error sending remote connect init");
+                                }
                             },
                             NodeType::Remote => {
                                 socket.set_nodelay(true)?;
@@ -170,12 +173,15 @@ impl NetworkManager {
                                 // Here a new reader task is created for each node
                                 // The reader will listen for new incoming messages on the TCPStream and send them to the sending half of the channel
                                 // This receiver will then be utilised to receive new responses from nodes within the cluster context
+
                                 let (node_tx, node_rx) = mpsc::channel::<Message>(100);
                                 // self.network_writers.insert(node_id.clone(), node_tx);
                                 self.network_readers.insert(node_id.clone(), Arc::new(Mutex::new(node_rx)));
                                 tokio::spawn(handle_node_connection(socket, self.network_receiver.clone(), node_tx, node_id.clone()));
-                                println!("{}", format!(r#"{{"src":"cluster-orchestrator","dest":"{node_id}","body":{{"type":"remote_connect"}}}}"#));
-                                self.network_sender.send(message::message_deserializer(&format!(r#"{{"src":"cluster-orchestrator","dest":"{node_id}","body":{{"type":"remote_connect"}}}}"#))?);
+
+                                if let Err(error) = self.cluster_sending_channel.send(format!(r#"{{"src":"cluster-orchestrator","dest":"{node_id}","body":{{"type":"remote_connect"}}}}"#)).await {
+                                    println!("Error sending remote connect init");
+                                }
 
                                 // self.add_connection(node_id.clone(), socket).await;
                                 println!("{} connected", node_id);
@@ -216,7 +222,7 @@ impl NetworkManager {
         .arg(node_id)// node_id
         .arg(node_bind_address) // node bind address
         .arg(local_path) // local path
-        .stdout(Stdio::null())
+        //.stdout(Stdio::null())
         .stdin(Stdio::null())
         .stderr(Stdio::null())
         .spawn();
@@ -262,11 +268,16 @@ pub async fn handle_node_connection(mut stream: TcpStream, mut recv_requests: Ar
 
     loop {
         let recv_requests_clone = Arc::clone(&recv_requests);
-        let mut recv_requests_lock = recv_requests_clone.lock().await;
 
         tokio::select! {
             // Handle incoming requests from the cluster
-            Some(message) = recv_requests_lock.recv() => {
+            Some(message) = async {
+                let mut recv_requests_lock = recv_requests_clone.lock().await;
+                let msg = recv_requests_lock.recv().await;
+                drop(recv_requests_lock);  // 🔥 FIX: Drop the lock immediately
+                msg
+            } => {
+                println!("Writing request to node {}", node_id);
                 let serialized = serialize_tcp_response(message).await.unwrap();
                 if let Err(e) = stream.write_all(&serialized.as_bytes()).await {
                     eprintln!("Failed to send message to {}: {:?}", node_id, e);
@@ -278,13 +289,18 @@ pub async fn handle_node_connection(mut stream: TcpStream, mut recv_requests: Ar
             result = stream.read(&mut buffer) => {
                 match result {
                     Ok(bytes) if bytes > 0 => {
-                        if let Ok(response) = deserialize_tcp_request(&buffer).await {
+                        let received_data = buffer[..bytes].to_vec(); // 🔥 FIX: Take only received bytes
+                        buffer.clear(); // 🔥 FIX: Clear buffer to prevent stale data
+
+                        if let Ok(response) = deserialize_tcp_request(&received_data).await {
                             // Send the response to the cluster
                             if let Err(e) = send_responses.send(response).await {
                                 eprintln!("Failed to send response from {}: {:?}", node_id, e);
+                            } else {
+                                println!("Remote response sent to node {}", node_id);
                             }
                         }
-                    }
+                    },
                     Ok(_) => {
                         eprintln!("Connection closed for node {}", node_id);
                         break;
