@@ -18,7 +18,7 @@ _ Generate
 
 _Unique ID 
 {"src": "c1", "dest": "node-1", "body": {"type": "generate", "msg_id": 1}}
-{"src": "c1", "dest": "n2", "body": {"type": "generate", "msg_id": 1}}
+{"src": "c1", "dest": "node-2", "body": {"type": "generate", "msg_id": 1}}
 
 _Broadcast
 {"src": "c2", "dest": "node-1", "body": {"type": "broadcast", "message": 10}}
@@ -29,7 +29,8 @@ _Broadcast Read
 {"src": "c2", "dest": "n2", "body": {"type": "read", "message": 10}}
 
 _Topology
-{"src": "c2", "dest": "n1", "body": {"type": "topology", "topology": {"n1": ["n2"], "n2": ["n1"]}}}
+{"src": "c2", "dest": "node-1", "body": {"type": "topology", "topology": {"node-1": ["node-2"]}}}
+{"src": "c2", "dest": "node-2", "body": {"type": "topology", "topology": {"node-2": ["node-1"]}}}
 
 _Vector Add and Read
 {"src": "c2", "dest": "n1", "body": {"type": "add", "delta": "1"}}

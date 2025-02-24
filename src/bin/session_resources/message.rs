@@ -238,7 +238,7 @@ pub fn message_deserializer(input_string: &String) -> Result<Message> {
                 body: MessageType::LogNodeMessages {},
             })
         }
-        _ => serde_json::from_str(input_string)
+        _ => serde_json::from_str(input_string.trim_ascii())
     }
 }
 

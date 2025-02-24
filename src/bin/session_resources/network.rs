@@ -38,8 +38,8 @@ pub struct NetworkManager {
     pub cluster_sending_channel: mpsc::Sender<String>,
     pub executable_connections: HashMap<String, Arc<Child>>,
     pub socket_connections: HashMap<String, Arc<TcpStream>>,
-    pub network_readers: HashMap<String, Arc<Mutex<mpsc::Receiver<Message>>>>,
-    pub network_writers: HashMap<String, mpsc::Sender<Message>>,
+    pub network_readers: HashMap<String, Arc<Mutex<mpsc::Receiver<Vec<Message>>>>>,
+    pub network_writers: HashMap<String, mpsc::Sender<Vec<Message>>>,
     pub network_sender: mpsc::Sender<Message>,
     pub network_receiver: Arc<Mutex<mpsc::Receiver<Message>>>,
     pub network_map: HashMap<String, (String, NodeType)>,
@@ -151,7 +151,7 @@ impl NetworkManager {
 
             while all_nodes_exist {
                 let (mut socket, addr) = listener.accept().await?;
-                
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                 if let Some((node_id, _node_client)) = address_node_lookup.get(&addr.to_string()) {
 
                     if let Some((_node_address, node_type)) = self.network_map.get(node_id) {
@@ -164,7 +164,8 @@ impl NetworkManager {
                                 }
                             },
                             NodeType::Remote => {
-                                socket.set_nodelay(true)?;
+                                //socket.set_nodelay(true)?;
+                                //socket.set_linger(Some(Duration::from_secs(60)))?;
 
                                 // Each node will get it's own writer task
                                 // This writer task will create a new receiver and sender channel, retaining the receiver on which to listen for new requests
@@ -174,7 +175,7 @@ impl NetworkManager {
                                 // The reader will listen for new incoming messages on the TCPStream and send them to the sending half of the channel
                                 // This receiver will then be utilised to receive new responses from nodes within the cluster context
 
-                                let (node_tx, node_rx) = mpsc::channel::<Message>(100);
+                                let (node_tx, node_rx) = mpsc::channel::<Vec<Message>>(100);
                                 // self.network_writers.insert(node_id.clone(), node_tx);
                                 self.network_readers.insert(node_id.clone(), Arc::new(Mutex::new(node_rx)));
                                 tokio::spawn(handle_node_connection(socket, self.network_receiver.clone(), node_tx, node_id.clone()));
@@ -263,12 +264,11 @@ pub async fn start_network_workers(network_layout: HashMap<String, Arc<Mutex<Tcp
     Ok(())
 }
 
-pub async fn handle_node_connection(mut stream: TcpStream, mut recv_requests: Arc<Mutex<mpsc::Receiver<Message>>>, send_responses: mpsc::Sender<Message>, node_id: String) {
+pub async fn handle_node_connection(mut stream: TcpStream, mut recv_requests: Arc<Mutex<mpsc::Receiver<Message>>>, send_responses: mpsc::Sender<Vec<Message>>, node_id: String) {
     let mut buffer = vec![0; 1024];
 
     loop {
         let recv_requests_clone = Arc::clone(&recv_requests);
-
         tokio::select! {
             // Handle incoming requests from the cluster
             Some(message) = async {
@@ -277,11 +277,19 @@ pub async fn handle_node_connection(mut stream: TcpStream, mut recv_requests: Ar
                 drop(recv_requests_lock);  // 🔥 FIX: Drop the lock immediately
                 msg
             } => {
-                println!("Writing request to node {}", node_id);
-                let serialized = serialize_tcp_response(message).await.unwrap();
-                if let Err(e) = stream.write_all(&serialized.as_bytes()).await {
-                    eprintln!("Failed to send message to {}: {:?}", node_id, e);
-                    break;
+                if let Some(message_target) = message.dest() {
+
+                    if message_target == &node_id {
+                        println!("Writing request to node {}", node_id);
+                        let serialized = serialize_tcp_response(message).await.unwrap();
+                        if let Err(e) = stream.write(&serialized.as_bytes()).await {
+                            eprintln!("Failed to send message to {}: {:?}", node_id, e);
+                            continue;
+                        }
+                    }
+                } else {
+                    eprintln!("Message must have valid destination {:?}", message);
+                    continue;
                 }
             },
 
@@ -289,10 +297,12 @@ pub async fn handle_node_connection(mut stream: TcpStream, mut recv_requests: Ar
             result = stream.read(&mut buffer) => {
                 match result {
                     Ok(bytes) if bytes > 0 => {
-                        let received_data = buffer[..bytes].to_vec(); // 🔥 FIX: Take only received bytes
-                        buffer.clear(); // 🔥 FIX: Clear buffer to prevent stale data
+                        let received_data = buffer[..bytes].to_vec(); // 🔥 FIX: Only take the received bytes
+                        println!("node handler bytes in {:?}", received_data);
+                        buffer.resize(1024, 0); // 🔥 FIX: Reset buffer AFTER copying data
+                        
 
-                        if let Ok(response) = deserialize_tcp_request(&received_data).await {
+                        if let Ok(response) = parse_vector_bytes(&received_data).await {
                             // Send the response to the cluster
                             if let Err(e) = send_responses.send(response).await {
                                 eprintln!("Failed to send response from {}: {:?}", node_id, e);
@@ -301,8 +311,8 @@ pub async fn handle_node_connection(mut stream: TcpStream, mut recv_requests: Ar
                             }
                         }
                     },
-                    Ok(_) => {
-                        eprintln!("Connection closed for node {}", node_id);
+                    Ok(bytes) => {
+                        eprintln!("Connection closed for node {} {}", node_id, bytes);
                         break;
                     }
                     Err(e) => {
@@ -316,31 +326,27 @@ pub async fn handle_node_connection(mut stream: TcpStream, mut recv_requests: Ar
 }
 
 pub async fn deserialize_tcp_request(incoming_stream: &Vec<u8>) -> Result<Message, ClusterExceptions> {
-    let received_bytes = incoming_stream.iter().filter(|x| **x != 0).map(|x| *x as u8).collect::<Vec<u8>>();
 
-    if let Ok(return_string) = String::from_utf8(received_bytes.to_vec()) {
-        if let Ok(message_request) = message::message_deserializer(&return_string) {
-            return Ok(message_request);
-        } else {
+    match String::from_utf8(incoming_stream.clone()) {
+        Ok(return_string) => {
+
+            match message::message_deserializer(&return_string) {
+                Ok(message_request) => {
+                    return Ok(message_request);
+                },
+                Err(error) => {
+                    println!("Error converting to Message {}", error);
+                    return Err(ClusterExceptions::MessageError(MessageExceptions::SerializationError));
+                }
+            };
+        },
+        Err(error) => {
+            println!("Error converting from utf8 bytes {}", error);
             return Err(ClusterExceptions::MessageError(MessageExceptions::SerializationError));
         }
-    } else {
-        return Err(ClusterExceptions::MessageError(MessageExceptions::SerializationError));
     }
 
 }
-
-pub async fn deserialize_tcp_request_string(incoming_stream: &Vec<u8>) -> Result<String, ClusterExceptions> {
-    let received_bytes = incoming_stream.iter().filter(|x| **x != 0).map(|x| *x as u8).collect::<Vec<u8>>();
-
-    if let Ok(return_string) = String::from_utf8(received_bytes.to_vec()) {
-            return Ok(return_string);
-    } else {
-        return Err(ClusterExceptions::MessageError(MessageExceptions::SerializationError));
-    }
-
-}
-
 
 pub async fn serialize_tcp_response(response: Message) -> Result<String, ClusterExceptions> {
 
@@ -351,10 +357,38 @@ pub async fn serialize_tcp_response(response: Message) -> Result<String, Cluster
     }
 }
 
+pub async fn parse_vector_bytes(bytes: &[u8]) -> Result<Vec<Message>, ClusterExceptions> {
+    let mut strings_buffer: Vec<Message> = Vec::with_capacity(100);
+
+    // Line end "\n" = 10
+    for string in bytes.rsplit(|x| *x == 10) {
+        println!("String {:?}", string);
+
+        match string.is_empty() {
+            true => {
+            },
+            false => {
+                // &string[..string.len()-1] to remove "\n" as last element in rsplitted byte sequence
+                match deserialize_tcp_request(&string.to_vec()).await {
+                    Ok(message) => {
+                        strings_buffer.push(message);
+                    },
+                    Err(error) => {
+                        println!("Error converting byte sequence to Message {}", error);
+                        return Err(ClusterExceptions::NetworkError(NetworkExceptions::TcpStreamError { error_message: "Error converting byte sequence to Message".to_string() }))
+                    }
+                };
+            }
+        }
+    }
+
+    Ok(strings_buffer)
+}
+
 pub async fn tcp_write(outgoing_stream: Arc<tokio::sync::Mutex<TcpStream>>, response_string: String) -> Result<(), ClusterExceptions> {
 
     let mut outgoing_stream = outgoing_stream.lock().await;
-    if let Err(error) = outgoing_stream.write_all(response_string.as_bytes()).await {
+    if let Err(error) = outgoing_stream.write(response_string.as_bytes()).await {
         return Err(ClusterExceptions::IOError(error));
     } else {
         outgoing_stream.flush();

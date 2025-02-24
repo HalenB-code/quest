@@ -11,6 +11,7 @@ use std::sync::Arc;
 use std::net::TcpStream;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::Mutex;
+use std::io::IoSlice;
 
 // TODO
 // Binary for node-only functionality that will be executed on remote machines
@@ -50,9 +51,81 @@ async fn main() -> std::io::Result<()> {
     
     let init_message = message::message_deserializer(&format!(r#"{{"type":"init","msg_id":0,"node_id":"{node_id}","node_ids":[]}}"#))?;
     let node: Node = Node::create(&init_message, &local_path).await;
-
+    
     if let Ok(mut cluster_stream) = cluster_tcp_connection {
         cluster_stream.set_nodelay(true)?;
+        
+        let mut node = node.clone();
+        let message_execution_type = message_execution_type.clone();
+        let local_file_path = local_path.clone();
+    
+        let (reader, mut writer) = cluster_stream.split();
+        let mut buf_reader = tokio::io::BufReader::new(reader);
+        let mut buffer = vec![0; 1024];
+    
+        loop {
+            match buf_reader.read(&mut buffer).await {
+                Ok(bytes) if bytes > 0 => {
+                    println!("Received {} bytes from cluster", bytes);
+    
+                    let received_data = buffer[..bytes].to_vec(); // 🔥 FIX: Only take the received bytes
+                    buffer.resize(1024, 0); // 🔥 FIX: Reset buffer AFTER copying data
+                    
+                    if let Ok(request) = network::deserialize_tcp_request(&received_data).await {
+                        match request {
+                            Message::Init { .. } => {
+                                node = Node::create(&request, &local_file_path).await;
+                            },
+                            _ => {
+                                if let Ok(response_messages) = node.execute(&message_execution_type, request.clone()).await {
+                                    println!("{} response vec {:?}", node_id, response_messages);
+
+                                    let _ = node.insert_log_message(request.clone()).await;
+                                    let mut output_buffer: Vec<IoSlice> = Vec::with_capacity(100);
+
+                                    for response_message in response_messages {
+                                        
+                                        if let Ok(mut response_string) = network::serialize_tcp_response(response_message).await {
+                                            response_string.push('\n');
+                                            output_buffer.push(IoSlice::new(Box::leak(response_string.clone().into_boxed_str()).as_bytes()));
+                                        }
+                                    }
+
+                                    // Small delay on first message received
+                                    if node.message_record.lock().await.len() == 0 {
+                                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                                    } 
+
+                                    if let Err(e) = writer.write_vectored(&output_buffer[..]).await {
+                                        eprintln!("Failed to write to stream: {}", e);
+                                        continue;
+                                    }                                            
+                                    
+                                    writer.flush().await?;
+                                    tokio::task::yield_now().await;
+                                    println!("Response posted to TCPStream");
+                                }
+                            }
+                        }
+                    }
+                },
+                Ok(_) => {
+                    println!("Connection closed by cluster {}", node_id);
+                    break;
+                },
+                Err(error) => {
+                    println!("Failed to read from stream: {}", error);
+                    break;
+                }
+            };
+        }
+    }
+    
+    println!("Main done!");
+    Ok(())
+    
+}
+
 
         // if let Ok(message_response_serialized) = network::serialize_tcp_response(message_response).await {
         //     match network::node_tcp_write(&mut cluster_stream, message_response_serialized).await {
@@ -78,66 +151,3 @@ async fn main() -> std::io::Result<()> {
         //     buffer.clear();
         //     //tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
         // }
-
-        let mut node = node.clone();
-        let message_execution_type = message_execution_type.clone();
-        let local_file_path = local_path.clone();
-
-        let (reader, mut writer) = cluster_stream.split();
-        let mut buf_reader = tokio::io::BufReader::new(reader);
-        let mut buffer = vec![0; 1024];
-        let mut received_bytes: Vec<u8> = Vec::with_capacity(1024);
-
-        loop {
-            // println!("Yo");
-            // buffer.clear();
-            // received_bytes.clear();
-
-            match buf_reader.read(&mut buffer).await {
-                Ok(bytes) => {
-                    // println!("Number of bytes {}", bytes);
-                    if bytes > 0 {
-                        // println!("Received buffer {:?}", buffer);
-                        received_bytes = buffer.iter().filter(|x| **x != 0).map(|x| *x as u8).collect::<Vec<u8>>();
-                        if let Ok(request) = network::deserialize_tcp_request(&received_bytes).await {
-                            match request {
-                                Message::Init { .. } => {
-                                    node = Node::create(&request, &local_file_path).await;
-                                },
-                                _ => {
-
-                                    if let Ok(response_messages) = node.execute(&message_execution_type, request.clone()).await {
-                                        if response_messages.len() > 0 {
-                                            for response_message in response_messages {
-                                                let _ = node.insert_log_message(request.clone()).await;
-                                                if let Ok(response_string) = network::serialize_tcp_response(response_message).await {
-                                                    if let Err(e) = writer.write(response_string.as_bytes()).await {
-                                                        eprintln!("Failed to write to stream: {}", e);
-                                                    } else {
-                                                        writer.flush().await?;
-                                                        println!("Response posted to TCPStream");
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    } else {
-                        println!("No bytes");
-                        // tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-                        continue;
-                    }
-
-                },
-                Err(error) => {eprintln!("Failed to read from stream: {}", error)}
-            };
-            // tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-        }
-    }
-    println!("Main done!");
-    Ok(())
-}
-
-

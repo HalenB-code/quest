@@ -12,9 +12,12 @@ pub struct Messenger {
 }
 
 impl Messenger {
-
     pub fn create() -> Self {
-        Self { message_requests: Arc::new(Mutex::new(VecDeque::new())), message_responses: Arc::new(Mutex::new(VecDeque::new())), message_record: HashMap::new( ) }
+        Self { 
+            message_requests: Arc::new(Mutex::new(VecDeque::new())), 
+            message_responses: Arc::new(Mutex::new(VecDeque::new())), 
+            message_record: HashMap::new( ) 
+        }
     }
 
     pub async fn categorize(&mut self, incoming_request: String) -> Result<Message, ClusterExceptions> {

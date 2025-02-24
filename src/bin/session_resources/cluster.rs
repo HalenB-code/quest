@@ -43,8 +43,7 @@ pub struct Cluster {
 }
   
 impl Cluster {
-  pub fn create(cluster_reference: usize, outgoing_message_handler: mpsc::Sender<String>, 
-    incoming_message_handler: mpsc::Receiver<String>, execution_target: MessageExecutionType, source_path: String, establish_network: bool) -> Self {
+  pub fn create(cluster_reference: usize, outgoing_message_handler: mpsc::Sender<String>, incoming_message_handler: mpsc::Receiver<String>, execution_target: MessageExecutionType, source_path: String, establish_network: bool) -> Self {
 
     let cluster_config = ClusterConfig::read_config(source_path);
     let wal_path = &cluster_config.working_directory.wal_path;
@@ -205,11 +204,10 @@ impl Cluster {
     }
   }
 
-  pub async fn poll_remote_responses(
-      &mut self,
-      remote_sender_id: &String,
-  ) -> Result<Message, ClusterExceptions> {
+  pub async fn poll_remote_responses(&mut self, remote_sender_id: &String) -> Result<Vec<Message>, ClusterExceptions> {
       println!("In poll_remote");
+      let mut buffer: Vec<Message> = Vec::with_capacity(100);
+      let limit = 100;
   
       match self.network_manager.network_readers.get(remote_sender_id.as_str()) {
           Some(node_receiver) => {
@@ -218,15 +216,14 @@ impl Cluster {
   
               // Wait for a response with a timeout
               match timeout(Duration::from_secs(5), node_receiver_lock.recv()).await {
-                  Ok(Some(message)) => {
-                      println!("Remote TCP response: {:?}", message);
-                      return Ok(message);
-                  }
-                  Ok(None) => {
-                      return Err(ClusterExceptions::RemoteNodeRequestError {
-                          error_message: format!("Channel closed for node {}", remote_sender_id),
-                      });
-                  }
+                  Ok(messages) => {
+                      if let Some(vector_messages) = messages {
+                        println!("Remote TCP response: {:?}", vector_messages);
+                        return Ok(vector_messages);
+                      } else {
+                        return Err(ClusterExceptions::RemoteNodeRequestError { error_message: format!("Channel closed for node {}", remote_sender_id) });
+                      }
+                  },
                   Err(_) => {
                       return Err(ClusterExceptions::RemoteNodeRequestError {
                           error_message: format!(
@@ -246,26 +243,31 @@ impl Cluster {
       }
   }
   
-
   pub async fn process_remote(&mut self, message_id: usize, message_request: Message) -> Result<(), ClusterExceptions> {
 
     let node_id = message_request.dest().unwrap();
+    
     let remote_sending_channel = &self.network_manager.network_sender;
 
     match remote_sending_channel.send(message_request.clone()).await {
       Ok(()) => {
-        println!("Message sent");
+        println!("Message sent to {}", node_id);
         match self.poll_remote_responses(node_id).await {
-          Ok(message_response) => {
+          Ok(message_responses) => {
             println!("poll remote returned");
-            match message_response.body().unwrap().is_ok() {
-              true => {
-                self.update_message_log(message_id, MessageStatus::Ok).await?;
-              },
-              false => {
-                self.update_message_log(message_id, MessageStatus::Failed).await?;
-              }
-            };
+
+            for message_response in message_responses {
+              match message_response.body().unwrap().is_ok() {
+                true => {
+                  self.update_message_log(message_id, MessageStatus::Ok).await?;
+                },
+                false => {
+                  // If one of the responses from the remote node is a follow-up request, add this to the response queue
+                  //self.messenger.response_queue(message_response).await?;
+                  self.update_message_log(message_id, MessageStatus::Failed).await?;
+                }
+              };
+            }
             return Ok(());
           },
           Err(error) => {
@@ -443,6 +445,7 @@ impl Cluster {
       // Process follow-ups with a slight delay if none exist
       self.process_followups().await?;
     }
+    
     Ok(())
   }
 

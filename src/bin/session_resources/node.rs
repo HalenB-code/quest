@@ -588,7 +588,7 @@ pub enum NodeRoleType {
             StdOut::write_to_std_out(stdout_lock, format!("Response {}", serialized_response))?;
         }
 
-        messages_return.push(message_response);
+        messages_return.insert(0, message_response);
 
         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
 

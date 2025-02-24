@@ -20,9 +20,9 @@ async fn main() {
 
   let implementation: Implementation = Implementation::EAGER;
   let message_execution_target = MessageExecutionType::StdOut;
-  let (tx, rx) = mpsc::channel::<String>(100);
+  let (external_tx, external_rx) = mpsc::channel::<String>(100);
 
-  let mut cluster: Cluster = Cluster::create(1, tx.clone(), rx, message_execution_target, source_path, establish_network);
+  let mut cluster: Cluster = Cluster::create(1, external_tx.clone(), external_rx, message_execution_target, source_path, establish_network);
 
   if establish_network {
       match cluster.network_manager.create_network().await {
@@ -38,7 +38,7 @@ async fn main() {
   // TODO
   // Establish network here
  
-  let mut session = Session::new(cluster, implementation, tx.clone());
+  let mut session = Session::new(cluster, implementation, external_tx.clone());
   
   tokio::spawn(async move {
     session.session_execution().await;
@@ -58,7 +58,7 @@ async fn main() {
             break;
           },
           _ => {
-            tx.send(request.to_string()).await;
+            external_tx.send(request.to_string()).await;
           }
         }
       },

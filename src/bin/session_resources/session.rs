@@ -24,7 +24,7 @@ impl Session {
   pub fn new(cluster: Cluster, implementation_type: Implementation, sender: mpsc::Sender<String>) -> Session {
     return Self {
       session_id: "999".to_string(), 
-      cluster: cluster.clone(), 
+      cluster, 
       implementation_type,
       sending_channel: sender
     }
