@@ -77,6 +77,7 @@ async fn main() -> std::io::Result<()> {
                                 node = Node::create(&request, &local_file_path).await;
                             },
                             _ => {
+                                println!("Request received from cluster {:?}", request);
                                 if let Ok(response_messages) = node.execute(&message_execution_type, request.clone()).await {
                                     println!("{} response vec {:?}", node_id, response_messages);
 

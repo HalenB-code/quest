@@ -38,10 +38,10 @@ pub struct NetworkManager {
     pub cluster_sending_channel: mpsc::Sender<String>,
     pub executable_connections: HashMap<String, Arc<Child>>,
     pub socket_connections: HashMap<String, Arc<TcpStream>>,
-    pub network_readers: HashMap<String, Arc<Mutex<mpsc::Receiver<Vec<Message>>>>>,
-    pub network_writers: HashMap<String, mpsc::Sender<Vec<Message>>>,
-    pub network_sender: mpsc::Sender<Message>,
-    pub network_receiver: Arc<Mutex<mpsc::Receiver<Message>>>,
+    // pub network_request_readers: HashMap<String, Arc<Mutex<mpsc::Receiver<Vec<Message>>>>>,
+    pub network_request_writers: HashMap<String, mpsc::Sender<Message>>,
+    // pub network_response_senders: HashMap<String, mpsc::Sender<Message>>,
+    pub network_response_readers: HashMap<String, Arc<Mutex<mpsc::Receiver<Vec<Message>>>>>,
     pub network_map: HashMap<String, (String, NodeType)>,
     pub shuffle_pattern: ShuffleType,
     pub local_path: String
@@ -67,7 +67,6 @@ impl NetworkManager {
         let mut layout = HashMap::new();
         let binding_address = network_config.clone().binding_address;
         let orchestrator_port = network_config.clone().orchestrator_port;
-        let (network_sender, network_receiver) = mpsc::channel::<Message>(100);
 
         for (idx, node) in network_config.clone().layout {
 
@@ -96,10 +95,10 @@ impl NetworkManager {
             cluster_sending_channel,
             executable_connections: HashMap::new(),
             socket_connections: HashMap::new(),
-            network_readers: HashMap::new(),
-            network_writers: HashMap::new(),
-            network_sender,
-            network_receiver: Arc::new(Mutex::new(network_receiver)),
+            // network_request_readers: HashMap::new(),
+            network_request_writers: HashMap::new(),
+            // network_response_senders HashMap::new(),
+            network_response_readers: HashMap::new(),
             network_map: layout,
             shuffle_pattern: ShuffleType::Ring,
             local_path
@@ -175,10 +174,11 @@ impl NetworkManager {
                                 // The reader will listen for new incoming messages on the TCPStream and send them to the sending half of the channel
                                 // This receiver will then be utilised to receive new responses from nodes within the cluster context
 
-                                let (node_tx, node_rx) = mpsc::channel::<Vec<Message>>(100);
-                                // self.network_writers.insert(node_id.clone(), node_tx);
-                                self.network_readers.insert(node_id.clone(), Arc::new(Mutex::new(node_rx)));
-                                tokio::spawn(handle_node_connection(socket, self.network_receiver.clone(), node_tx, node_id.clone()));
+                                let (network_response_sender, network_response_receiver) = mpsc::channel::<Vec<Message>>(100);
+                                let (network_request_sender, network_request_receiver) = mpsc::channel::<Message>(100);
+                                self.network_response_readers.insert(node_id.clone(), Arc::new(Mutex::new(network_response_receiver)));
+                                self.network_request_writers.insert(node_id.clone(), network_request_sender);
+                                tokio::spawn(handle_node_connection(socket, network_request_receiver, network_response_sender, node_id.clone()));
 
                                 if let Err(error) = self.cluster_sending_channel.send(format!(r#"{{"src":"cluster-orchestrator","dest":"{node_id}","body":{{"type":"remote_connect"}}}}"#)).await {
                                     println!("Error sending remote connect init");
@@ -191,7 +191,7 @@ impl NetworkManager {
                     }
                 }
 
-                all_nodes_exist = if &self.network_readers.len() == &self.network_map.len() { false } else { true };
+                all_nodes_exist = if &self.network_response_readers.len() == &self.network_map.len() { false } else { true };
 
             };
             
@@ -264,17 +264,15 @@ pub async fn start_network_workers(network_layout: HashMap<String, Arc<Mutex<Tcp
     Ok(())
 }
 
-pub async fn handle_node_connection(mut stream: TcpStream, mut recv_requests: Arc<Mutex<mpsc::Receiver<Message>>>, send_responses: mpsc::Sender<Vec<Message>>, node_id: String) {
+
+pub async fn handle_node_connection(mut stream: TcpStream, mut recv_requests: mpsc::Receiver<Message>, send_responses: mpsc::Sender<Vec<Message>>, node_id: String) {
     let mut buffer = vec![0; 1024];
 
     loop {
-        let recv_requests_clone = Arc::clone(&recv_requests);
         tokio::select! {
             // Handle incoming requests from the cluster
             Some(message) = async {
-                let mut recv_requests_lock = recv_requests_clone.lock().await;
-                let msg = recv_requests_lock.recv().await;
-                drop(recv_requests_lock);  // 🔥 FIX: Drop the lock immediately
+                let msg = recv_requests.recv().await;
                 msg
             } => {
                 if let Some(message_target) = message.dest() {
@@ -283,12 +281,14 @@ pub async fn handle_node_connection(mut stream: TcpStream, mut recv_requests: Ar
                         println!("Writing request to node {}", node_id);
                         let serialized = serialize_tcp_response(message).await.unwrap();
                         if let Err(e) = stream.write(&serialized.as_bytes()).await {
-                            eprintln!("Failed to send message to {}: {:?}", node_id, e);
+                            println!("Failed to send message to {}: {:?}", node_id, e);
                             continue;
                         }
+                    } else {
+                        println!("Message target not matching node {} {:?}", message_target, node_id);
                     }
                 } else {
-                    eprintln!("Message must have valid destination {:?}", message);
+                    println!("Message must have valid destination {:?}", message);
                     continue;
                 }
             },
@@ -297,9 +297,9 @@ pub async fn handle_node_connection(mut stream: TcpStream, mut recv_requests: Ar
             result = stream.read(&mut buffer) => {
                 match result {
                     Ok(bytes) if bytes > 0 => {
-                        let received_data = buffer[..bytes].to_vec(); // 🔥 FIX: Only take the received bytes
+                        let received_data = buffer[..bytes].to_vec();
                         println!("node handler bytes in {:?}", received_data);
-                        buffer.resize(1024, 0); // 🔥 FIX: Reset buffer AFTER copying data
+                        buffer.resize(1024, 0);
                         
 
                         if let Ok(response) = parse_vector_bytes(&received_data).await {

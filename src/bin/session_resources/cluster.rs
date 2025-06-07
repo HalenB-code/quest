@@ -43,24 +43,45 @@ pub struct Cluster {
 }
   
 impl Cluster {
-  pub fn create(cluster_reference: usize, outgoing_message_handler: mpsc::Sender<String>, incoming_message_handler: mpsc::Receiver<String>, execution_target: MessageExecutionType, source_path: String, establish_network: bool) -> Self {
+  pub async fn create(cluster_reference: usize, outgoing_message_handler: mpsc::Sender<String>, incoming_message_handler: mpsc::Receiver<String>, execution_target: MessageExecutionType, source_path: String, establish_network: bool) -> Self {
 
     let cluster_config = ClusterConfig::read_config(source_path);
     let wal_path = &cluster_config.working_directory.wal_path;
     let file_system_accessibility = &cluster_config.working_directory.file_system_type;
     let network_layout = &cluster_config.network;
 
-    Self { 
+    let network_manager = NetworkManager::new(network_layout, outgoing_message_handler, cluster_config.working_directory.local_path.clone(), establish_network);
+    let mut nodes = BTreeMap::new();
+    let other_nodes = network_manager.network_map.clone().into_keys().collect::<Vec<String>>();
+    let network_map = network_manager.network_map.clone();
+
+    if establish_network {
+
+      for (node_id, (node_port, node_type)) in network_map {
+        match node_type {
+          NodeType::Local => {
+          },
+          NodeType::Remote => {
+            let init_request = message::message_deserializer(&format!(r#"{{"type":"init","msg_id":0,"node_id":"{node_id}","node_ids":{:?}}}"#, other_nodes)).expect("Expecting correct init request structure");
+            let virtual_remote_node = Node::create(&init_request, &cluster_config.working_directory.local_path.clone()).await;
+            nodes.insert(node_id.to_string(), virtual_remote_node);
+          }
+        }
+      }
+      
+    }
+
+    Self {
       cluster_id: format!("cluster-{cluster_reference}"), 
       receiving_channel: Arc::new(Mutex::new(incoming_message_handler)),
       execution_target,
       messenger: Messenger::create(), 
-      nodes: BTreeMap::new(), 
+      nodes,
       node_message_log: HashMap::new(),
       transaction_manager: TransactionManager::new(wal_path.clone().as_str()),
       cluster_configuration: cluster_config.clone(),
       file_system_manager: FileSystemManager::new(file_system_accessibility),
-      network_manager: NetworkManager::new(network_layout, outgoing_message_handler, cluster_config.working_directory.local_path, establish_network)
+      network_manager
     }
   }
 
@@ -209,13 +230,13 @@ impl Cluster {
       let mut buffer: Vec<Message> = Vec::with_capacity(100);
       let limit = 100;
   
-      match self.network_manager.network_readers.get(remote_sender_id.as_str()) {
+      match self.network_manager.network_response_readers.get(remote_sender_id.as_str()) {
           Some(node_receiver) => {
               println!("Now polling for response...");
               let mut node_receiver_lock = node_receiver.lock().await;
   
               // Wait for a response with a timeout
-              match timeout(Duration::from_secs(5), node_receiver_lock.recv()).await {
+              match timeout(Duration::from_secs(10), node_receiver_lock.recv()).await {
                   Ok(messages) => {
                       if let Some(vector_messages) = messages {
                         println!("Remote TCP response: {:?}", vector_messages);
@@ -245,43 +266,61 @@ impl Cluster {
   
   pub async fn process_remote(&mut self, message_id: usize, message_request: Message) -> Result<(), ClusterExceptions> {
 
-    let node_id = message_request.dest().unwrap();
-    
-    let remote_sending_channel = &self.network_manager.network_sender;
+    let message_request_clone = message_request.clone();
+    let message_type = message_request_clone.msg_type().unwrap();
 
-    match remote_sending_channel.send(message_request.clone()).await {
-      Ok(()) => {
-        println!("Message sent to {}", node_id);
-        match self.poll_remote_responses(node_id).await {
-          Ok(message_responses) => {
-            println!("poll remote returned");
-
-            for message_response in message_responses {
-              match message_response.body().unwrap().is_ok() {
-                true => {
-                  self.update_message_log(message_id, MessageStatus::Ok).await?;
-                },
-                false => {
-                  // If one of the responses from the remote node is a follow-up request, add this to the response queue
-                  //self.messenger.response_queue(message_response).await?;
-                  self.update_message_log(message_id, MessageStatus::Failed).await?;
-                }
-              };
-            }
-            return Ok(());
-          },
-          Err(error) => {
-            println!("Send failed");
-            return Err(ClusterExceptions::RemoteNodeRequestError { error_message: error.to_string() });
-          }
-        };
+    // TODO: Add TX loop to handle transaction type
+    // Loop should call complete transaction fn below
+    match message_type.as_str() {
+      "txn" => {
+        self.complete_transaction_remote(message_id, message_request).await?;
+        return Ok(());
       },
-      Err(error) => {
-        println!("Remote request sent and err");
-        return Err(ClusterExceptions::RemoteNodeRequestError { error_message: error.to_string() });
-      }
-    }
+      _ => {
+        
+        let node_id = message_request_clone.dest().unwrap();
 
+        if let Some(remote_sending_channel) = &self.network_manager.network_request_writers.get(node_id) {
+
+              match remote_sending_channel.send(message_request.clone()).await {
+              Ok(()) => {
+                println!("Message sent to {}", node_id);
+                match self.poll_remote_responses(node_id).await {
+                  Ok(message_responses) => {
+                    println!("poll remote returned");
+
+                    for message_response in message_responses {
+                      match message_response.body().unwrap().is_ok() {
+                        true => {
+                          self.update_message_log(message_id, MessageStatus::Ok).await?;
+                        },
+                        false => {
+                          // If one of the responses from the remote node is a follow-up request, add this to the response queue
+                          //self.messenger.response_queue(message_response).await?;
+                          self.update_message_log(message_id, MessageStatus::Failed).await?;
+                        }
+                      };
+                    }
+                    return Ok(());
+                  },
+                  Err(error) => {
+                    println!("Send failed");
+                    return Err(ClusterExceptions::RemoteNodeRequestError { error_message: error.to_string() });
+                  }
+                };
+              },
+              Err(error) => {
+                println!("Remote request sent and err");
+                return Err(ClusterExceptions::RemoteNodeRequestError { error_message: error.to_string() });
+              }
+            } 
+          } else {
+            println!("No sending channel found for node {}", node_id);
+              return Err(ClusterExceptions::RemoteNodeRequestError { error_message: "no sending channel".to_string() });
+          }
+      }
+    };
+    
   }
 
   pub async fn categorize_and_queue(&mut self, incoming_message: String) -> Result<(), ClusterExceptions> {
@@ -338,34 +377,94 @@ impl Cluster {
     Ok(())
   }
 
-  pub async fn complete_transaction(&mut self, message_request: Message) -> Result<(), ClusterExceptions> {
+  pub async fn complete_transaction_remote(&mut self, message_id: usize, message_request: Message) -> Result<(), ClusterExceptions> {
 
-  let node_topology = self.get_nodes();
+      let node_topology = self.get_nodes();
+      let transaction_id = self.transaction_manager.start_transaction(message_request.clone(), node_topology).await?;
+      let transaction_actions = self.transaction_manager.execute_transaction(message_request.dest().unwrap().clone(), transaction_id).await?;
+      let mut transaction_execution_error = None;
 
-  let transaction_id = self.transaction_manager.start_transaction(message_request.clone(), node_topology).await?;
-  let transaction_actions = self.transaction_manager.execute_transaction(message_request.dest().unwrap().clone(), transaction_id).await?;
+      println!("Transaction actions: {:?}", transaction_actions);
 
-  let mut transaction_execution_error = None;
+      for action in transaction_actions {
 
-  for action in transaction_actions {
+        if let Some(transaction_message_request) = action.value {
 
-    if let Some(transaction_message_request) = action.value {
-      if let Err(_error) = self.messenger.request_queue(transaction_message_request).await {
-        transaction_execution_error = Some(())
+          let node_id = transaction_message_request.dest().unwrap();
+
+          if let Some(remote_sending_channel) = &self.network_manager.network_request_writers.get(node_id) {
+
+            match remote_sending_channel.send(transaction_message_request.clone()).await {
+              Ok(()) => {
+
+                match self.poll_remote_responses(node_id).await {
+                  Ok(message_responses) => {
+
+                    for message_response in message_responses {
+                      match message_response.body().unwrap().is_ok() {
+                        true => {
+                          ()
+                        },
+                        false => {
+                          // If one of the responses from the remote node is a follow-up request, add this to the response queue
+                          transaction_execution_error = Some(());
+                        }
+                      };
+                    }
+                  },
+                  Err(_error) => {
+                    transaction_execution_error = Some(());;
+                  }
+                };
+              },
+              Err(_error) => {
+                transaction_execution_error = Some(());;
+              }
+            } 
+        } else {
+          transaction_execution_error = Some(());;
+        }
+
       }
-    }
-  };
 
-  if let None = transaction_execution_error {
-    self.transaction_manager.commit_transaction(transaction_id).await?;
-    Ok(())
-  } else {
-    return Err(ClusterExceptions::TransactionError(TransactionExceptions::FailedToCommitTransaction { error_message: transaction_id.to_string() }));
+    };
+
+    if let None = transaction_execution_error {
+      self.transaction_manager.commit_transaction(transaction_id).await?;
+      self.update_message_log(message_id, MessageStatus::Ok).await?;
+      return Ok(())
+    } else {
+      self.update_message_log(message_id, MessageStatus::Failed).await?;
+      return Err(ClusterExceptions::TransactionError(TransactionExceptions::FailedToCommitTransaction { error_message: transaction_id.to_string() }));
+    }
+
   }
 
-  // self.abort
-  // self.roll_back
-  // self.recover
+  pub async fn complete_transaction(&mut self, message_request: Message) -> Result<(), ClusterExceptions> {
+
+    let node_topology = self.get_nodes();
+
+    let transaction_id = self.transaction_manager.start_transaction(message_request.clone(), node_topology).await?;
+    let transaction_actions = self.transaction_manager.execute_transaction(message_request.dest().unwrap().clone(), transaction_id).await?;
+
+    let mut transaction_execution_error = None;
+
+    for action in transaction_actions {
+
+      if let Some(transaction_message_request) = action.value {
+        if let Err(_error) = self.messenger.request_queue(transaction_message_request).await {
+          transaction_execution_error = Some(())
+        }
+      }
+
+    };
+
+    if let None = transaction_execution_error {
+      self.transaction_manager.commit_transaction(transaction_id).await?;
+      Ok(())
+    } else {
+      return Err(ClusterExceptions::TransactionError(TransactionExceptions::FailedToCommitTransaction { error_message: transaction_id.to_string() }));
+    }
 
   }
 
@@ -532,7 +631,7 @@ impl Cluster {
       // TODO
       // This will pull Node from first element in vector which is not guaranteed to be n1
       // nodes can also be empty
-      transaction.set_dest("".to_string());
+      transaction.set_dest(nodes[0].to_string());
 
       let file_system_type = self.cluster_configuration.working_directory.file_system_type.clone();
 

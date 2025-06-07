@@ -163,7 +163,7 @@ pub enum NodeRoleType {
 
         let mut messages_return: Vec<Message> = Vec::new();
         let node_message_queue_ref = self.node_message_log_id().await;
-
+        println!("In node {}", self.node_id);
         let message_response: Message;
 
         // TODO

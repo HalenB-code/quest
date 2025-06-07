@@ -22,7 +22,7 @@ async fn main() {
   let message_execution_target = MessageExecutionType::StdOut;
   let (external_tx, external_rx) = mpsc::channel::<String>(100);
 
-  let mut cluster: Cluster = Cluster::create(1, external_tx.clone(), external_rx, message_execution_target, source_path, establish_network);
+  let mut cluster: Cluster = Cluster::create(1, external_tx.clone(), external_rx, message_execution_target, source_path, establish_network).await;
 
   if establish_network {
       match cluster.network_manager.create_network().await {
