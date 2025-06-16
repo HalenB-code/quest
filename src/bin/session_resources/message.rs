@@ -192,6 +192,19 @@ pub enum MessageType {
     RemoteConnectOk {
     },
     RemoteShutdown {
+    },
+    WriteToFile {
+        file_path: String,
+        file_format: String
+    },
+    WriteToFileOk {
+    },
+    Aggregate {
+        df_name: String,
+        keys: String,
+        agg_type: String,
+    },
+    AggregateOk {
     }
 }
 
@@ -298,6 +311,10 @@ impl fmt::Display for MessageType {
             MessageType::RemoteConnect { .. } => write!(f, "RemoteConnect"),
             MessageType::RemoteConnectOk { .. } => write!(f, "RemoteConnectOk"),
             MessageType::RemoteShutdown { .. } => write!(f, "RemoteShutdown"),
+            MessageType::WriteToFile { .. } => write!(f, "WriteToFile"),
+            MessageType::WriteToFileOk { .. } => write!(f, "WriteToFileOk"),
+            MessageType::Aggregate { .. } => write!(f, "Aggregate"),
+            MessageType::AggregateOk { .. } => write!(f, "AggregateOk"),
         }
     }
 }
@@ -537,6 +554,10 @@ impl MessageTypeFields for MessageType {
             MessageType::RemoteConnect { .. } => "remote_connect".to_string(),
             MessageType::RemoteConnectOk { .. } => "remote_connect_ok".to_string(),
             MessageType::RemoteShutdown { .. } => "remote_shutdown".to_string(),
+            MessageType::WriteToFile { .. } => "write_to_file".to_string(),
+            MessageType::WriteToFileOk { .. } => "write_to_file_ok".to_string(),
+            MessageType::Aggregate { .. } => "aggregate".to_string(),
+            MessageType::AggregateOk { .. } => "aggregate_ok".to_string(),
         }
     }
 

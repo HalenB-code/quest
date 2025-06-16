@@ -601,63 +601,63 @@ impl Cluster {
 
   pub fn read_data_from_file(&mut self, file_path: String, delimiter: Option<String>) -> Result<String, ClusterExceptions> {
 
-  // Receive read request message
-  // File path retrieved from request
-  // Nodes are retrieved from cluster
-  // File path is added to file manager record
-  // Byte ordinals are generated for file based on nodes
-  // Transaction message is created that has a read request for each node with ordinal positions
-  // Depending on the FileSystemType, read is either receive bytes from home client and write to local file
-  // or, read existing file on distributed file share
-  // Read transaction completed or failed
+    // Receive read request message
+    // File path retrieved from request
+    // Nodes are retrieved from cluster
+    // File path is added to file manager record
+    // Byte ordinals are generated for file based on nodes
+    // Transaction message is created that has a read request for each node with ordinal positions
+    // Depending on the FileSystemType, read is either receive bytes from home client and write to local file
+    // or, read existing file on distributed file share
+    // Read transaction completed or failed
 
-  // Get nodes
-  let nodes = self.get_nodes();
-  let separator: u8;
+    // Get nodes
+    let nodes = self.get_nodes();
+    let separator: u8;
 
-  if let Some(delim) = delimiter {
-    separator = delim.as_bytes()[0];
-  } else {
-    separator = ",".to_string().as_bytes()[0];
-  }
-
-  // Inserts hash of file path into FileSystemManager
-  if let Ok(file_path_hash) = self.file_system_manager.read_from_file(file_path.clone(), &nodes) {
-    
-    // Open new transaction
-    if let Some(ref mut transaction) = Message::default_request_message(MessageType::Transaction { txn: vec![] } ) {
-      transaction.set_src("cluster-orchestrator".to_string());
-
-      // TODO
-      // This will pull Node from first element in vector which is not guaranteed to be n1
-      // nodes can also be empty
-      transaction.set_dest(nodes[0].to_string());
-
-      let file_system_type = self.cluster_configuration.working_directory.file_system_type.clone();
-
-      let infered_file_schema = FileSystemManager::get_file_header(file_path.clone(), separator)?;
-      let infered_file_schema_string = serde_json::to_string(&infered_file_schema)?;
-      let byte_ordinals = FileSystemManager::get_byte_ordinals(file_path.clone(), &nodes)?;
-      let byte_ordinals_string = serde_json::to_string(&byte_ordinals)?;
-      
-      if let Some(_file_object) = self.file_system_manager.files.get(&file_path_hash) {
-        transaction.set_body(MessageType::Transaction { txn: vec![vec!["rf".to_string(), file_path.clone(), file_system_type.to_string(), byte_ordinals_string, infered_file_schema_string]] });
-      } else {
-        return Err(ClusterExceptions::UnkownClientRequest { error_message: file_path });
-      }
-
-      if let Ok(request_string) = message_serializer(&transaction) {
-        return Ok(request_string);
-      } else {
-        return Err(ClusterExceptions::UnkownClientRequest { error_message: file_path });
-      }
-
+    if let Some(delim) = delimiter {
+      separator = delim.as_bytes()[0];
     } else {
-      return Err(ClusterExceptions::UnkownClientRequest { error_message: file_path });
+      separator = ",".to_string().as_bytes()[0];
     }
-  } else {
-  return Err(ClusterExceptions::UnkownClientRequest { error_message: file_path });
-  }
+
+    // Inserts hash of file path into FileSystemManager
+    if let Ok(file_path_hash) = self.file_system_manager.read_from_file(file_path.clone(), &nodes) {
+      
+      // Open new transaction
+      if let Some(ref mut transaction) = Message::default_request_message(MessageType::Transaction { txn: vec![] } ) {
+        transaction.set_src("cluster-orchestrator".to_string());
+
+        // TODO
+        // This will pull Node from first element in vector which is not guaranteed to be n1
+        // nodes can also be empty
+        transaction.set_dest(nodes[0].to_string());
+
+        let file_system_type = self.cluster_configuration.working_directory.file_system_type.clone();
+
+        let infered_file_schema = FileSystemManager::get_file_header(file_path.clone(), separator)?;
+        let infered_file_schema_string = serde_json::to_string(&infered_file_schema)?;
+        let byte_ordinals = FileSystemManager::get_byte_ordinals(file_path.clone(), &nodes)?;
+        let byte_ordinals_string = serde_json::to_string(&byte_ordinals)?;
+        
+        if let Some(_file_object) = self.file_system_manager.files.get(&file_path_hash) {
+          transaction.set_body(MessageType::Transaction { txn: vec![vec!["rf".to_string(), file_path.clone(), file_system_type.to_string(), byte_ordinals_string, infered_file_schema_string]] });
+        } else {
+          return Err(ClusterExceptions::UnkownClientRequest { error_message: file_path });
+        }
+
+        if let Ok(request_string) = message_serializer(&transaction) {
+          return Ok(request_string);
+        } else {
+          return Err(ClusterExceptions::UnkownClientRequest { error_message: file_path });
+        }
+
+      } else {
+        return Err(ClusterExceptions::UnkownClientRequest { error_message: file_path });
+      }
+    } else {
+    return Err(ClusterExceptions::UnkownClientRequest { error_message: file_path });
+    }
 
   }
 
@@ -665,6 +665,7 @@ impl Cluster {
     let destination_node: String;
     let all_available_nodes = self.get_nodes();
     let n_rows = 5;
+
     if let Some(node) = target_node {
       destination_node = node;
     } else {
@@ -755,6 +756,14 @@ impl Cluster {
             return Err(ClusterExceptions::NodeDoesNotExist { error_message: request });
           }
         },
+        "group-by" => {
+          if let Some(df_name) = df_name {
+            let request_string = self.display_df(df_name.to_string(), target_node, all_nodes)?;
+            return Ok(request_string);
+          } else {
+            return Err(ClusterExceptions::NodeDoesNotExist { error_message: request });
+          }
+        },
         "log-cluster" => {
           // TODO
           // Need to accept log level when log request received
@@ -799,6 +808,51 @@ impl Cluster {
     } else {
       return Err(ClusterExceptions::InvalidClusterRequest { error_message_1: message_response, error_message_2: "StdOut".to_string() });
     }
+  }
+
+  pub fn df_group_by(&mut self, df_name: String, keys: Vec<String>, aggregation: String) -> Result<String, ClusterExceptions> {
+
+    // Receive read request message
+    // File path retrieved from request
+    // Nodes are retrieved from cluster
+    // File path is added to file manager record
+    // Byte ordinals are generated for file based on nodes
+    // Transaction message is created that has a read request for each node with ordinal positions
+    // Depending on the FileSystemType, read is either receive bytes from home client and write to local file
+    // or, read existing file on distributed file share
+    // Read transaction completed or failed
+
+    // Get nodes
+    let nodes = self.get_nodes();
+
+    // Open new transaction
+    if let Some(ref mut transaction) = Message::default_request_message(MessageType::Transaction { txn: vec![] } ) {
+      transaction.set_src("cluster-orchestrator".to_string());
+
+      // TODO
+      // This will pull Node from first element in vector which is not guaranteed to be n1
+      // nodes can also be empty
+      transaction.set_dest(nodes[0].to_string());
+
+      let group_by_keys: String = keys.join(";");
+
+      // Params going to group-by transaction
+      // Working dir file path
+      // group-by aggregation keys
+      // group-by aggregation type
+      // 
+      transaction.set_body(MessageType::Transaction { txn: vec![vec!["group-by".to_string(), df_name.clone(), group_by_keys, aggregation]] });
+
+      if let Ok(request_string) = message_serializer(&transaction) {
+        return Ok(request_string);
+      } else {
+        return Err(ClusterExceptions::UnkownClientRequest { error_message: "group-by".to_string() });
+      }
+
+    } else {
+      return Err(ClusterExceptions::UnkownClientRequest { error_message: "group-by".to_string() });
+    }
+
   }
 
 

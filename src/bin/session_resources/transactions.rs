@@ -15,7 +15,8 @@ pub enum TransactionTypes {
     Read,
     Write,
     ReadFile,
-    DisplayDf
+    DisplayDf,
+    GroupBy
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -122,6 +123,35 @@ impl Action {
                         } 
                     } ) 
                 } );
+            },
+            TransactionTypes::GroupBy => {
+
+                // Steps for GroupBy action
+                // First compute intermediate results on current node
+                // Then send the results to all other nodes to compute final result via fs
+
+                // Read from node datastore
+                // Compute aggregation on current node
+                // Write intermediate results to node datastore and file system
+                // Then read intermediate results from other nodes
+                // Recompute by updating intermediate results from node datastore
+                // Then return ok()
+                let df_name = steps.get(&"df_name".to_string()).unwrap().to_string();
+                let aggregation_keys = steps.get(&"keys".to_string()).unwrap().to_string();
+                let aggregation_type = steps.get(&"aggregation".to_string()).unwrap().to_string();
+
+                return Ok( Action { 
+                    key: TransactionTypes::GroupBy, 
+                    value: Some( Message::Request { 
+                        src: message.src().unwrap().clone(), 
+                        dest: message.dest().unwrap().clone(), 
+                        body: MessageType::Aggregate { 
+                            df_name,
+                            keys: aggregation_keys,
+                            agg_type: aggregation_type
+                        } 
+                    } ) 
+                } );
             }
         }
         
@@ -193,7 +223,17 @@ impl Transaction {
                 } else {
                     return Err(ClusterExceptions::TransactionError(TransactionExceptions::TransactionInstructionSetError));
                 }
-            },          
+            },
+            x if x == "group-by" => {
+                if steps.len() == 4_usize {   
+                    action_steps.insert("df_name".to_string(), steps[1].clone());
+                    action_steps.insert("keys".to_string(), steps[2].clone());
+                    action_steps.insert("aggregation".to_string(), steps[3].clone());
+                    return Ok((TransactionTypes::DisplayDf, action_steps));
+                } else {
+                    return Err(ClusterExceptions::TransactionError(TransactionExceptions::TransactionInstructionSetError));
+                }
+            },
             _ => {
                 return Err(ClusterExceptions::TransactionError(TransactionExceptions::TransactionInstructionSetError));
             }
@@ -244,6 +284,17 @@ impl Transaction {
                     action_steps.push("display-df".to_string());
                     action_steps.push(hash_steps.get(&"df_name".to_string()).unwrap().to_string());
                     action_steps.push(hash_steps.get(&"n_rows".to_string()).unwrap().to_string());
+                    return Ok(action_steps);
+                } else {
+                    return Err(ClusterExceptions::TransactionError(TransactionExceptions::TransactionInstructionSetError));
+                }
+            },
+            TransactionTypes::GroupBy => {
+                if hash_steps.len() == 4_usize {  
+                    action_steps.push("group-by".to_string());
+                    action_steps.push(hash_steps.get(&"df_name".to_string()).unwrap().to_string());
+                    action_steps.push(hash_steps.get(&"keys".to_string()).unwrap().to_string());
+                    action_steps.push(hash_steps.get(&"aggregation".to_string()).unwrap().to_string());
                     return Ok(action_steps);
                 } else {
                     return Err(ClusterExceptions::TransactionError(TransactionExceptions::TransactionInstructionSetError));
@@ -329,6 +380,33 @@ impl Transaction {
                             // Update destination node to route transaction actions across network
                             updated_message_request.set_dest(node.clone());
                             if let Ok(built_action) = Action::build(TransactionTypes::DisplayDf, &action_steps, updated_message_request, None) {
+                                self.actions.push(built_action);
+                            } else {
+                                return Err(ClusterExceptions::TransactionError(TransactionExceptions::TransactionInstructionSetError));
+                            }
+                        };
+                    },
+                    TransactionTypes::GroupBy => {
+                        let mut all_nodes: Vec<String> = vec![];
+                        if let Some(first_node) = transaction_request.dest() {
+                            all_nodes.push(first_node.clone());
+
+                            // Only extend all_nodes with elements from other_nodes if other_nodes contains additional node_ids than first_node
+                            // get_nodes() is the function call that produces param other_nodes so if "n1" is the only node, it will appear
+                            // first in transaction_request.dest() and then in other_nodes as we do not filter the return list when calling other_nodes
+                            if other_nodes.iter().filter(|x| *x != first_node).map(|x| x.to_string()).collect::<Vec<String>>().len() > 0 {
+                                all_nodes.extend(other_nodes.clone());
+                            }
+                            
+                        } else {
+                            return Err(ClusterExceptions::TransactionError(TransactionExceptions::TransactionInstructionSetError));
+                        }
+                        for node in all_nodes.clone().into_iter() {
+                            let mut updated_message_request = transaction_request.clone();
+
+                            // Update destination node to route transaction actions across network
+                            updated_message_request.set_dest(node.clone());
+                            if let Ok(built_action) = Action::build(TransactionTypes::GroupBy, &action_steps, updated_message_request, None) {
                                 self.actions.push(built_action);
                             } else {
                                 return Err(ClusterExceptions::TransactionError(TransactionExceptions::TransactionInstructionSetError));

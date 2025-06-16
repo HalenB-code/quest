@@ -393,6 +393,44 @@ impl DataFrame {
         None
     }
 
+    pub fn count(&self, column: String) -> Option<usize> {
+
+        if let Some(column) = self.columns.get(&column) {
+            let column_type = column.column_type();
+
+            match column_type {
+                ColumnType::IntVec => {
+                    if let Some(values) = ColumnData::<Vec<i32>>::as_data(column)  {
+                        let count_total = values.iter().len();
+                        return Some(count_total as usize);
+                    }
+                },
+                ColumnType::FloatVec => {
+                    if let Some(values) = ColumnData::<Vec<f64>>::as_data(column)  {
+                        let count_total = values.iter().len();
+                        return Some(count_total as usize);
+                    }
+                },
+                ColumnType::IntNestedVec => {
+                    if let Some(values) = ColumnData::<Vec<Vec<i32>>>::as_data(column)  {
+                        let count_total = values.iter().len();
+                        return Some(count_total as usize);
+                    }
+                },
+                ColumnType::FloatNestedVec => {
+                    if let Some(values) = ColumnData::<Vec<Vec<f64>>>::as_data(column)  {
+                        let count_total = values.iter().len();
+                        return Some(count_total as usize);
+                    }
+                },              
+                _ => {
+                    return None;
+                }
+            }
+        }
+        None
+    }
+
     
 }
 
