@@ -750,13 +750,42 @@ impl fmt::Display for MessageStatus {
 }
 
 impl Message {
-    pub fn default_request_message(message_type: MessageType) -> Option<Self> {
+    pub fn default_request_message(message_type: &str) -> Option<Self> {
         match message_type {
-            MessageType::Transaction { .. } => Some(Message::Request { 
+            "Transaction" => Some(Message::Request { 
                 src: "default".to_string(), 
                 dest: "default".to_string(), 
                 body: (
                     MessageType::Transaction { txn: vec![] }
+                )
+            }),
+            "Aggregate" => Some(Message::Request { 
+                src: "default".to_string(), 
+                dest: "default".to_string(), 
+                body: (
+                    MessageType::Aggregate { df_name: "".to_string(), keys: "".to_string(), agg_type: "".to_string() }
+                )
+            }),
+            "WriteToFile" => Some(Message::Request { 
+                src: "default".to_string(), 
+                dest: "default".to_string(), 
+                body: (
+                    MessageType::WriteToFile { 
+                        file_path: "".to_string(), 
+                        file_format: "".to_string()
+                    }
+                )
+            }),
+            "ReadFromFile" => Some(Message::Request { 
+                src: "default".to_string(), 
+                dest: "default".to_string(), 
+                body: (
+                    MessageType::ReadFromFile { 
+                        file_path: "".to_string(), 
+                        accessibility: "".to_string(), 
+                        bytes: "".to_string(), 
+                        schema: "".to_string()
+                    }
                 )
             }),
             _ => None,

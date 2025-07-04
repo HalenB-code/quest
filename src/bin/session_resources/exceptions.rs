@@ -37,6 +37,7 @@ pub enum ClusterExceptions {
     NodeMessagePropogationFailed { error_message: String },
     NetworkError(NetworkExceptions),
     RemoteNodeRequestError { error_message: String },
+    InvalidCommand { error_message: String },
     // Add other error types here
 }
 
@@ -152,6 +153,9 @@ impl fmt::Display for ClusterExceptions {
             },
             ClusterExceptions::RemoteNodeRequestError { error_message } => {
                 write!(f, "Node '{}' failed to propogate request.", error_message)
+            },
+            ClusterExceptions::InvalidCommand { error_message } => {
+                write!(f, "Invalid command received: '{}'. Please check the command and try again.", error_message)
             },
         }
     }
