@@ -11,7 +11,8 @@ use crate::session_resources::file_system::FileSystemType;
 #[derive(Deserialize, Debug, Clone)]
 pub struct ClusterConfig {
     pub working_directory: WorkingDirectory,
-    pub network: Network
+    pub network: Network,
+    pub cluster_settings: ClusterSettings,
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -28,6 +29,11 @@ pub struct Network {
     pub binding_address: String,
     pub orchestrator_port: String,
     pub layout: HashMap<String, HashMap<String, String>>,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct ClusterSettings {
+    pub execution_mode: String,
 }
 
 impl ClusterConfig {

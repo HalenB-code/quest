@@ -7,3 +7,6 @@ file_system_type = "Replicated"
 binding_address = "127.0.0.1"
 orchestrator_port = "7777"
 layout = {1={name="node-1",port="7778"}, 2={name="node-2",port="7779"}}
+
+[cluster_settings]
+execution_mode = "eager"

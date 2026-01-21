@@ -205,7 +205,13 @@ pub enum MessageType {
         agg_type: String,
     },
     AggregateOk {
-    }
+    },
+    Union {
+        df_name: String,
+        keys: String,
+    },
+    UnionOk {
+    },
 }
 
 // Module to handle serialization and deserialization as a JSON string.
@@ -315,6 +321,8 @@ impl fmt::Display for MessageType {
             MessageType::WriteToFileOk { .. } => write!(f, "WriteToFileOk"),
             MessageType::Aggregate { .. } => write!(f, "Aggregate"),
             MessageType::AggregateOk { .. } => write!(f, "AggregateOk"),
+            MessageType::Union { .. } => write!(f, "Union"),
+            MessageType::UnionOk { .. } => write!(f, "UnionOk"),
         }
     }
 }
@@ -558,6 +566,8 @@ impl MessageTypeFields for MessageType {
             MessageType::WriteToFileOk { .. } => "write_to_file_ok".to_string(),
             MessageType::Aggregate { .. } => "aggregate".to_string(),
             MessageType::AggregateOk { .. } => "aggregate_ok".to_string(),
+            MessageType::Union { .. } => "union".to_string(),
+            MessageType::UnionOk { .. } => "union_ok".to_string(),
         }
     }
 

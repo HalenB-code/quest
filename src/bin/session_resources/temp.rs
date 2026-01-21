@@ -5,20 +5,22 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use serde_json;
 
-use crate::session_resources::message::{MessageFields, MessageType, MessageTypeFields, Message};
+use crate::session_resources::message::{MessageFields, MessageType, MessageTypeFields, Message, MessageStatus};
 use crate::session_resources::exceptions::ClusterExceptions;
 use crate::session_resources::write_ahead_log::{WalEntry, WriteAheadLog};
 use crate::session_resources::cli::ClusterCommand;
-use crate::session_resources::cluster::ClusterContext;
+use crate::session_resources::cluster::Cluster;
 use crate::session_resources::file_system::{FileSystemManager};
-use crate::session_resources::message::message_deserializer;
+
+// const WAL_PATH: &str = r"C:\rust\projects\rust-bdc";
+const OVERWRITE_INCOMING_MSG_ID: bool = true;
 
 #[derive(Debug, Clone)]
-pub struct QueryPlan {
-    pub cluster_context: ClusterContext,
-    pub query_plan_id: usize,
-    pub query_plan_steps: BTreeMap<usize, HashMap<usize, (String, QueryPlanTypes, Message, QueryPlanStatus)>>, // usize is step of query plan; usize is sub-step of query plan step; String = node_id, QueryPlanTypes, String = message string, QueryPlanType Status
-    pub query_plan_status: QueryPlanStatus,
+pub struct QueryPlan<'a> {
+    cluster_reference: &'a Cluster,
+    query_plan_id: usize,
+    query_plan_steps: BTreeMap<usize, HashMap<usize, (String, QueryPlanTypes, String, QueryPlanStatus)>>, // usize is step of query plan; usize is sub-step of query plan step; String = node_id, QueryPlanTypes, String = message string, QueryPlanType Status
+    query_plan_status: QueryPlanStatus,
 }
 
 #[derive(Debug, Clone)]
@@ -37,12 +39,12 @@ pub enum QueryPlanStatus {
     Failed
 }
 
-impl QueryPlan {
+impl<'a> QueryPlan<'a> {
 
-    pub fn new(cluster_context: ClusterContext) -> Self {
+    pub fn new(cluster_reference: &'a Cluster) -> Self {
 
         QueryPlan {
-            cluster_context,
+            cluster_reference,
             query_plan_id: 0,
             query_plan_steps: BTreeMap::new(),
             query_plan_status: QueryPlanStatus::Pending,
@@ -50,9 +52,7 @@ impl QueryPlan {
 
     }
 
-    // This creates a message type for each request in the cluster command
-    // The messages are stored in the query plan steps with the node target, query plan type, message string, and status
-    pub async fn add_step(&mut self, cluster_command: ClusterCommand) -> Result<(), ClusterExceptions> {
+    pub async fn plan(&mut self, cluster_command: ClusterCommand) -> Result<(), ClusterExceptions> {
 
         match cluster_command {
 
@@ -60,7 +60,6 @@ impl QueryPlan {
 
                 let query_plan_idx = self.query_plan_steps.len() + 1;
                 let mut query_plan_steps = HashMap::new();
-                let cluster_config = self.cluster_context.cluster_config.clone();
 
                 // Step 1: Aggregate
                 let query_plan_step_idx = query_plan_steps.len() + 1;
@@ -83,7 +82,7 @@ impl QueryPlan {
                     // Otherwise a separate messaged must be sent to a node to retrieve the schema and that costs more than storing metadata in the cluster
 
                     message_request_string.set_body(MessageType::WriteToFile {
-                        file_path: format!("{}/{}/intermediate_data_file.csv", cluster_config.working_directory.local_path.clone(), target_name),
+                        file_path: format!("{}/{}/intermediate_data_file.csv", self.cluster_reference.cluster_configuration.working_directory.local_path.clone(), target_name),
                         file_format: aggregation_type.clone(),
                         // Schema
                     });
@@ -99,7 +98,7 @@ impl QueryPlan {
                 if let Some(mut message_request_string) = Message::default_request_message("ReadFromFile") {
                     // Assuming the file is stored in the local file system
                     message_request_string.set_body(MessageType::ReadFromFile {
-                        file_path: format!("{}/{}/intermediate_data_file.csv", cluster_config.working_directory.local_path.clone(), target_name),
+                        file_path: format!("{}/{}/intermediate_data_file.csv", self.cluster_reference.cluster_configuration.working_directory.local_path.clone(), target_name),
                         accessibility: "local".to_string(), // Assuming local for now
                         bytes: "".to_string(), // Placeholder for byte ordinals
                         schema: "".to_string(), // Placeholder for schema
@@ -111,6 +110,7 @@ impl QueryPlan {
                 } else {
                     return Err(ClusterExceptions::InvalidCommand { error_message: "read-from-file".to_string() });
                 }
+
 
                 // Step 4: Aggregate extend
 
@@ -132,7 +132,7 @@ impl QueryPlan {
 
                 // Aggregate
                 if let Some(mut message_request_string) = Message::default_request_message("AggregateExtend") {
-                    
+
                     // TODO: Add Union Msg Type so AggregateExtend = 1. Union intermediate results, 2. Aggregate again
                     message_request_string.set_body(MessageType::Aggregate {
                         df_name: target_name.clone(),
@@ -153,7 +153,6 @@ impl QueryPlan {
             ClusterCommand::CmdDisplayDf { target_name, target_node, n_rows } => {
                 let query_plan_idx = self.query_plan_steps.len() + 1;
                 let mut query_plan_steps = HashMap::new();
-                let cluster_nodes = self.cluster_context.nodes.clone();
 
                 // Step 1: Display DataFrame
                 let query_plan_step_idx = query_plan_steps.len() + 1;
@@ -174,7 +173,7 @@ impl QueryPlan {
                 } else {
 
                     // If target_node is "all", then we need to send the request to all nodes
-                    let all_nodes = cluster_nodes;
+                    let all_nodes = self.cluster_reference.get_nodes();
 
                     for node in all_nodes.iter() {
                         if let Some(mut message_request_string) = Message::default_request_message("DisplayDf") {
@@ -193,17 +192,14 @@ impl QueryPlan {
             ClusterCommand::CmdReadFile { target_file_path, target_node, delimiter } => {
                 let query_plan_idx = self.query_plan_steps.len() + 1;
                 let mut query_plan_steps = HashMap::new();
-                let cluster_config = self.cluster_context.cluster_config.clone();
-                let mut cluster_fs_manager = self.cluster_context.file_system_manager.clone();
-                let cluster_nodes = self.cluster_context.nodes.clone();
 
                 let separator: u8;
 
                 // TODO: Support other delimiters
                 separator = ",".to_string().as_bytes()[0];
 
-                let file_system_type = cluster_config.working_directory.file_system_type.clone();
-                let infered_file_schema = FileSystemManager::get_file_header(cluster_config.working_directory.local_path.clone(), separator)?;
+                let file_system_type = self.cluster_reference.cluster_configuration.working_directory.file_system_type.clone();
+                let infered_file_schema = FileSystemManager::get_file_header(self.cluster_reference.cluster_configuration.working_directory.local_path.clone(), separator)?;
                 let infered_file_schema_string = serde_json::to_string(&infered_file_schema)?;
 
 
@@ -214,8 +210,8 @@ impl QueryPlan {
 
                     let nodes = target_node.split(',').collect::<Vec<&str>>();
 
-                    let file_path_hash = cluster_fs_manager.read_from_file(cluster_config.working_directory.local_path.clone(), &cluster_nodes)?;
-                    let byte_ordinals = FileSystemManager::get_byte_ordinals(cluster_config.working_directory.local_path.clone(), &cluster_nodes)?;
+                    let file_path_hash = self.cluster_reference.file_system_manager.read_from_file(self.cluster_reference.cluster_configuration.working_directory.local_path.clone(), &self.cluster_reference.get_nodes())?;
+                    let byte_ordinals = FileSystemManager::get_byte_ordinals(self.cluster_reference.cluster_configuration.working_directory.local_path.clone(), &self.cluster_reference.get_nodes())?;
                     let byte_ordinals_string = serde_json::to_string(&byte_ordinals)?;
 
                     for node in nodes.iter() {
@@ -225,8 +221,8 @@ impl QueryPlan {
                             message_request_string.set_body(MessageType::ReadFromFile {
                                 file_path: target_file_path.clone(),
                                 accessibility: "local".to_string(), // Assuming local for now
-                                bytes: byte_ordinals_string.clone(),
-                                schema: infered_file_schema_string.clone(),
+                                bytes: byte_ordinals_string,
+                                schema: infered_file_schema_string,
                             });
                             query_plan_steps.insert(query_plan_step_idx, (target_file_path.clone(), QueryPlanTypes::ReadFromFile, message_request_string, QueryPlanStatus::Pending));
 
@@ -237,10 +233,10 @@ impl QueryPlan {
                 } else {
 
                     // If target_node is "all", then we need to send the request to all nodes
-                    let all_nodes = cluster_nodes;
+                    let all_nodes = self.cluster_reference.get_nodes();
 
-                    let file_path_hash = cluster_fs_manager.read_from_file(cluster_config.working_directory.local_path.clone(), &all_nodes)?;
-                    let byte_ordinals = FileSystemManager::get_byte_ordinals(cluster_config.working_directory.local_path.clone(), &all_nodes)?;
+                    let file_path_hash = self.cluster_reference.file_system_manager.read_from_file(self.cluster_reference.cluster_configuration.working_directory.local_path.clone(), &self.cluster_reference.get_nodes())?;
+                    let byte_ordinals = FileSystemManager::get_byte_ordinals(self.cluster_reference.cluster_configuration.working_directory.local_path.clone(), &self.cluster_reference.get_nodes())?;
                     let byte_ordinals_string = serde_json::to_string(&byte_ordinals)?;
 
                     for node in all_nodes.iter() {
@@ -249,8 +245,8 @@ impl QueryPlan {
                             message_request_string.set_body(MessageType::ReadFromFile {
                                 file_path: target_file_path.clone(),
                                 accessibility: "local".to_string(), // Assuming local for now
-                                bytes: byte_ordinals_string.clone(),
-                                schema: infered_file_schema_string.clone(),
+                                bytes: byte_ordinals_string,
+                                schema: infered_file_schema_string,
                             });
                             query_plan_steps.insert(query_plan_step_idx, (node.clone(), QueryPlanTypes::ReadFromFile, message_request_string, QueryPlanStatus::Pending));
 
@@ -262,13 +258,19 @@ impl QueryPlan {
 
                 Ok(())
             },
+            ClusterCommand::CmdLogCluster { logging_target } => {
+                Ok(())
+            },
+            ClusterCommand::CmdLogNode { logging_target } => {
+                Ok(())
+            },
             ClusterCommand::CmdMessageString { message } => {
 
                 let query_plan_idx = self.query_plan_steps.len() + 1;
                 let mut query_plan_steps = HashMap::new();
-                let message_encoded = message_deserializer(&message)?;
 
-                query_plan_steps.insert(query_plan_idx, (message_encoded.dest().clone(), QueryPlanTypes::ReadFromFile, message_encoded.clone(), QueryPlanStatus::Pending));
+                // Step 1: Aggregate
+                let query_plan_step_idx = query_plan_steps.len() + 1;
 
                 Ok(())
 
@@ -281,11 +283,131 @@ impl QueryPlan {
 
     }
 
-    pub fn get_latest_query_step(&mut self) -> usize {
-        if let Some(last_entry_id) =  self.query_plan_steps.last_entry().key() {
-        return *last_entry_id;
+    pub async fn start_transaction(&mut self, transaction_request: Message, node_topology: Vec<String>) -> Result<usize, ClusterExceptions> {
+        let id = self.active_transactions.len() as usize + 1;
+
+        // Receive incoming request -- which can be actual message in JSON or command that maps to several messages -- as CLIType
+        // Incoming request then wrapped in transaction
+        // This will include transaction id, instructions, req/response handling, and commit/abort logic
+
+
+        let transaction = Transaction::new(id);
+        self.active_transactions.insert(id, transaction);
+
+        if let Some(new_transaction) = self.active_transactions.get_mut(&id) {
+            new_transaction.build_instructions(transaction_request, node_topology)?;
+        };
+
+        // Write to WAL
+        if let Err(_error) = self.wal
+            .lock()
+            .await
+            .write_entry(&WalEntry::TransactionStart { transaction_id: id }) {
+                return Err(ClusterExceptions::TransactionError(TransactionExceptions::FailedToWriteToWal { error_message: id.to_string() }));
+        };
+        Ok(id)
+    }
+
+    pub async fn execute_transaction(&mut self, node_id: String, transaction_id: usize) -> Result<Vec<Action>, ClusterExceptions> {
+
+        if let Some(transaction) = self.active_transactions.get_mut(&transaction_id) {
+            self.lock_manager.acquire_lock(node_id.as_str(), transaction_id)?;
+
+            transaction.locks.push(node_id.to_string());
+
+            
+            for action in transaction.actions.clone().into_iter() {
+                
+                // Log the actions in WAL
+                if let Err(error) = self.wal
+                    .lock()
+                    .await
+                    .write_entry(&WalEntry::ActionLog {
+                    transaction_id,
+                    node: action.value.clone().unwrap().src().unwrap().clone(),
+                    action: action.clone(),
+                }) {
+                    return Err(ClusterExceptions::TransactionError(TransactionExceptions::FailedToWriteToWal { error_message: transaction_id.to_string() }));
+                };
+
+
+            }
+            Ok(transaction.actions.to_vec())
         } else {
-            return 0;
+            return Err(ClusterExceptions::TransactionError(TransactionExceptions::TransactionNotFound));
+        }
+    }
+
+    pub async fn commit_transaction(&mut self, transaction_id: usize) -> Result<(), ClusterExceptions> {
+        if let Some(transaction) = self.active_transactions.get_mut(&transaction_id) {
+
+            // Apply actions to the database
+            for action in &transaction.actions {
+                if let Some(value) = &action.value {
+                    self.database.insert(action.key.clone(), value.clone());
+                } else {
+                    self.database.remove(&action.key);
+                }
+            }
+
+            // Update WAL
+            self.wal
+                .lock()
+                .await
+                .write_entry(&WalEntry::TransactionCommit { transaction_id })
+                .expect("Failed to write to WAL");
+
+            // Release locks and remove transaction
+            for key in &transaction.locks {
+                self.lock_manager.release_lock(key, transaction_id);
+            }
+            self.active_transactions.remove(&transaction_id);
+            Ok(())
+        } else {
+            return Err(ClusterExceptions::TransactionError(TransactionExceptions::TransactionNotFound));
+        }
+    }
+
+    pub async fn abort_transaction(&mut self, transaction_id: usize) {
+        if let Some(transaction) = self.active_transactions.get_mut(&transaction_id) {
+            // Update WAL
+            self.wal
+                .lock()
+                .await
+                .write_entry(&WalEntry::TransactionAbort { transaction_id })
+                .expect("Failed to write to WAL");
+
+            // Release locks and remove transaction
+            for key in &transaction.locks {
+                self.lock_manager.release_lock(key, transaction_id);
+            }
+            self.active_transactions.remove(&transaction_id);
+        }
+    }
+
+
+    pub async fn process_plan() {
+        // Process each step in the query plan
+
+        for (step_idx, step_details) in self.query_plan_steps.clone().into_iter() {
+            for (sub_step_idx, (node_id, plan_type, message_string, status)) in step_details.into_iter() {
+
+                match plan_type {
+                    QueryPlanTypes::Aggregate => {
+                        // Send aggregate message to node
+                    },
+                    QueryPlanTypes::WriteToFile => {
+                        // Send write to file message to node
+                    },
+                    QueryPlanTypes::ReadFromFile => {
+                        // Send read from file message to node
+                    },
+                    QueryPlanTypes::AggregateExtend => {
+                        // Send aggregate extend message to node
+                    }
+                }
+
+            }
         }
     }
 
@@ -440,20 +562,20 @@ impl Action {
 }
 
 #[derive(Debug, Clone)]
-pub struct Transaction {
+pub struct Transaction<'a> {
     pub id: usize,
     pub state: TransactionState,
-    pub actions: Vec<Action>,
+    pub actions: QueryPlan<'a>,
     pub locks: Vec<String>, // Keys that this transaction has locked.
 }
 
-impl Transaction {
+impl<'a>  Transaction<'a> {
 
-    pub fn new(id: usize) -> Self {
+    pub fn new(id: usize, cluster_reference: &'a Cluster) -> Self {
         Transaction {
             id,
             state: TransactionState::Pending,
-            actions: Vec::new(),
+            actions: QueryPlan::new(cluster_reference),
             locks: Vec::new(),
         }
     }
@@ -683,7 +805,7 @@ impl Transaction {
                             }
                         };
                     },
-                     TransactionTypes::GroupBy => {
+                    TransactionTypes::GroupBy => {
                         let mut all_nodes: Vec<String> = vec![];
                         if let Some(first_node) = transaction_request.dest() {
                             all_nodes.push(first_node.clone());
@@ -698,29 +820,63 @@ impl Transaction {
                         } else {
                             return Err(ClusterExceptions::TransactionError(TransactionExceptions::TransactionInstructionSetError));
                         }
-                        for node in all_nodes.clone().into_iter() {
+
+                        let query_plan = QueryPlaner::plan("group-by").into();
+                        
+                        // For each action in query plan, create a transaction action
+                        for (step, value) in query_plan.clone().into_iter() {
+
+                            // For each node in all_nodes, create a transaction action
+                            for (idx, node) in all_nodes.clone().into_iter().enumerate() {
+
+                                match step {
+                                    "Aggregate" => {
+
+                                        // Update destination node to route transaction actions across network
+                                        updated_message_request.set_dest(node.clone());
+
+                                        if let Ok(built_action) = Action::build(TransactionTypes::GroupBy, &action_steps, updated_message_request, None) {
+                                            self.actions.push(built_action);
+                                        } else {
+                                            return Err(ClusterExceptions::TransactionError(TransactionExceptions::TransactionInstructionSetError));
+                                        }
+                                    },
+                                    "WriteToFile" => {
+                                        // TODO: schema must accompany file path as input param to intermediate-write-to-file; this is so the same schema can be used to read the file later
+                                        let (action_type, action_steps_additional) = self.hash_transaction_steps(&"intermediate-write-to-file".to_string(), format!("{}_ABC123EFG.csv", node))?;
+
+                                        if let Ok(built_action) = Action::build(TransactionTypes::GroupBy, &action_steps_additional, updated_message_request, None) {
+                                            self.actions.push(built_action);
+                                        } else {
+                                            return Err(ClusterExceptions::TransactionError(TransactionExceptions::TransactionInstructionSetError));
+                                        }
+
+                                    },
+                                    "ReadFromFile" => {
+                                        // Read from file system
+                                        let (action_type, action_steps_additional) = self.hash_transaction_steps(&"intermediate-write-to-file".to_string(), format!("{}_ABC123EFG.csv", node))?;
+                                    },
+                                    "AggregateExtend" => {
+                                        // Extend aggregation with intermediate results
+                                        action_steps.insert(step.to_string(), value.to_string());
+                                    },
+                                    _ => {}
+                                }
+                                action_steps.insert(step, value.to_string());
+                            }
                             let mut updated_message_request = transaction_request.clone();
 
-                            // Update destination node to route transaction actions across network
-                            updated_message_request.set_dest(node.clone());
-                            if let Ok(built_action) = Action::build(TransactionTypes::GroupBy, &action_steps, updated_message_request, None) {
-                                self.actions.push(built_action);
-                            } else {
-                                return Err(ClusterExceptions::TransactionError(TransactionExceptions::TransactionInstructionSetError));
-                            }
-                        }
+
+                        };
                     }
                 }
-
             }
+
+        }
 
         Ok(())
 
-    } else {
-        return Err(ClusterExceptions::TransactionError(TransactionExceptions::TransactionInstructionSetError));
     }
-
-}
 
 }
 
@@ -756,156 +912,439 @@ impl LockManager {
 }
 
 #[derive(Debug, Clone)]
-pub struct TransactionManager {
-    pub cluster_context: ClusterContext,
-    pub query_plan: QueryPlan,
-    pub active_transactions: HashMap<usize, Transaction>,
+pub struct TransactionManager<'a> {
+    pub cluster_reference: &'a Cluster,
+    pub active_transactions: HashMap<usize, Transaction<'a>>,
     pub lock_manager: LockManager,
-    pub wal: Arc<Mutex<WriteAheadLog>>,
-    pub database: HashMap<TransactionTypes, Message>,
+    pub node_message_log: HashMap<usize, (Message, String)>
+    pub wal: Arc<Mutex<WriteAheadLog>>, 
+    pub database: HashMap<usize, QueryPlan<'a>>,
 }
 
-impl TransactionManager {
-    pub fn new(wal_path: &str, cluster_context: ClusterContext) -> Self {
+impl<'a> TransactionManager<'a> {
+    pub fn new(wal_path: &str, cluster_reference: &'a Cluster) -> Self {
         TransactionManager {
-            cluster_context: cluster_context.clone(),
-            query_plan: QueryPlan::new(cluster_context),
+            cluster_reference: cluster_reference,
             active_transactions: HashMap::new(),
             lock_manager: LockManager::new(),
+            node_message_log: HashMap::new(),
             wal: Arc::new(Mutex::new(WriteAheadLog::new(wal_path).expect("Failed to initialize WAL"))),
             database: HashMap::new(),
         }
     }
 
-    // pub async fn process_plan() {
-    //     // Process each step in the query plan
+    pub async fn insert_message_log(&mut self, message: Message) -> Result<usize, ClusterExceptions> {
 
-    //     for (step_idx, step_details) in self.query_plan_steps.clone().into_iter() {
-    //         for (sub_step_idx, (node_id, plan_type, message_string, status)) in step_details.into_iter() {
+        let message_id = self.node_message_log.keys().max().unwrap_or(&0_usize) + 1;
 
-    //             match plan_type {
-    //                 QueryPlanTypes::Aggregate => {
-    //                     // Send aggregate message to node
-    //                 },
-    //                 QueryPlanTypes::WriteToFile => {
-    //                     // Send write to file message to node
-    //                 },
-    //                 QueryPlanTypes::ReadFromFile => {
-    //                     // Send read from file message to node
-    //                 },
-    //                 QueryPlanTypes::AggregateExtend => {
-    //                     // Send aggregate extend message to node
-    //                 }
-    //             }
+        // Insert message in log as pending
+        self.node_message_log.insert(message_id, (message.clone(), MessageStatus::Pending.to_string()));
 
-    //         }
-    //     }
-    // }
-
-pub async fn start_transaction(&mut self, transaction_request: Message, node_topology: Vec<String>) -> Result<usize, ClusterExceptions> {
-        let id = self.active_transactions.len() as usize + 1;
-
-        // Receive incoming request -- which can be actual message in JSON or command that maps to several messages -- as CLIType
-        // Incoming request then wrapped in transaction
-        // This will include transaction id, instructions, req/response handling, and commit/abort logic
-
-
-        let transaction = Transaction::new(id);
-        self.active_transactions.insert(id, transaction);
-
-        if let Some(new_transaction) = self.active_transactions.get_mut(&id) {
-            new_transaction.build_instructions(transaction_request, node_topology)?;
-        };
-
-        // Write to WAL
-        if let Err(_error) = self.wal
-            .lock()
-            .await
-            .write_entry(&WalEntry::TransactionStart { transaction_id: id }) {
-                return Err(ClusterExceptions::TransactionError(TransactionExceptions::FailedToWriteToWal { error_message: id.to_string() }));
-        };
-        Ok(id)
+        Ok(message_id)
     }
 
-    pub async fn execute_transaction(&mut self, node_id: String, transaction_id: usize) -> Result<Vec<Action>, ClusterExceptions> {
+    pub async fn update_message_log(&mut self, message_id: usize, message_status: MessageStatus) -> Result<(), ClusterExceptions> {
 
-        if let Some(transaction) = self.active_transactions.get_mut(&transaction_id) {
-            self.lock_manager.acquire_lock(node_id.as_str(), transaction_id)?;
-
-            transaction.locks.push(node_id.to_string());
-
-            
-            for action in transaction.actions.clone().into_iter() {
-                
-                // Log the actions in WAL
-                if let Err(error) = self.wal
-                    .lock()
-                    .await
-                    .write_entry(&WalEntry::ActionLog {
-                    transaction_id,
-                    node: action.value.clone().unwrap().src().unwrap().clone(),
-                    action: action.clone(),
-                }) {
-                    return Err(ClusterExceptions::TransactionError(TransactionExceptions::FailedToWriteToWal { error_message: transaction_id.to_string() }));
-                };
-
-
+        match message_status {
+            MessageStatus::Ok => {
+            self.node_message_log
+            .entry(message_id)
+            .and_modify(|(_key, value)| {
+                *value = MessageStatus::Ok.to_string();
+            });
+            },
+            MessageStatus::Failed => {
+            self.node_message_log
+            .entry(message_id)
+            .and_modify(|(_key, value)| {
+                *value = MessageStatus::Failed.to_string();
+            });
             }
-            Ok(transaction.actions.to_vec())
-        } else {
-            return Err(ClusterExceptions::TransactionError(TransactionExceptions::TransactionNotFound));
+            _ => {
+            return Err(ClusterExceptions::MessageStatusNotUpdated {
+                error_message: message_id.to_string(),
+            })
+            }
         }
+
+        Ok(())
     }
 
-    pub async fn commit_transaction(&mut self, transaction_id: usize) -> Result<(), ClusterExceptions> {
-        if let Some(transaction) = self.active_transactions.get_mut(&transaction_id) {
 
-            // Apply actions to the database
-            for action in &transaction.actions {
-                if let Some(value) = &action.value {
-                    self.database.insert(action.key.clone(), value.clone());
-                } else {
-                    self.database.remove(&action.key);
+    pub async fn categorize_and_queue(&mut self, incoming_message: String) -> Result<(), ClusterExceptions> {
+
+        let mapped_message = ClusterCommand::map_command_line_request(incoming_message)?;
+
+        let mut message_request = QueryPlan::new(self.cluster_reference);
+        let message_id = self.insert_message_log(message_request.clone()).await?;
+
+        if OVERWRITE_INCOMING_MSG_ID {
+            message_request.set_msg_id(message_id);
+        }
+
+        match message_request.dest() {
+            None => {
+            println!("{:?}", message_request.msg_type().unwrap());
+            match message_request.msg_type().unwrap().as_str() {
+                "log_cluster_messages" => {
+                
+                if let Ok(()) = self.log_messages() {
+                    let message_response = Message::Response {
+                    src: message_request.dest().unwrap().to_string(),
+                    dest: message_request.src().unwrap().to_string(),
+                    body: MessageType::LogClusterMessagesOk {
+                    }
+                };
+                    self.cluster_response(message_response)?;
+                }            
+                },
+                "init" => {
+                self.process_local(message_id, message_request).await?;
+                }
+                _ => {
                 }
             }
-
-            // Update WAL
-            self.wal
-                .lock()
-                .await
-                .write_entry(&WalEntry::TransactionCommit { transaction_id })
-                .expect("Failed to write to WAL");
-
-            // Release locks and remove transaction
-            for key in &transaction.locks {
-                self.lock_manager.release_lock(key, transaction_id);
+            },
+            Some(_destination) => {
+            if let Some((_node, node_type)) = self.network_manager.network_map.get(message_request.dest().unwrap()) {
+                match node_type {
+                    NodeType::Local => {
+                    self.process_local(message_id, message_request).await?;
+                    },
+                    NodeType::Remote => {
+                    self.process_remote(message_id, message_request).await?;
+                    }
+                }
+            } else {
+                // If request is init or another type, we don't need confirmation node exists
+                self.update_message_log(message_id, MessageStatus::Failed).await?;
+                return Err(ClusterExceptions::NodeDoesNotExist { error_message: message_request.dest().unwrap().clone() });
             }
-            self.active_transactions.remove(&transaction_id);
+            }
+        }
+
+        Ok(())
+    }
+
+    pub async fn process_local(&mut self, message_id: usize, message_request: Message) -> Result<(), ClusterExceptions> {
+
+    match message_request {
+
+        Message::Init { .. } => {
+            if let Err(error) = self.process_initialization(message_request).await {
+            self.update_message_log(message_id, MessageStatus::Failed).await?;
+            return Err(error);
+            } else {
+            self.update_message_log(message_id, MessageStatus::Ok).await?;
+            return Ok(());
+            };
+        },
+        Message::Request { .. } => {
+        match message_request.msg_type().unwrap().as_str() {
+            "txn" => {
+            if let Err(error) = self.categorize_and_queue_transactions(message_request).await {
+                self.update_message_log(message_id, MessageStatus::Failed).await?;
+                return Err(error);
+            } else {
+                self.update_message_log(message_id, MessageStatus::Ok).await?;
+                return Ok(());
+            };
+            },
+            _ => {
+            if let Err(error) = self.messenger.request_queue(message_request).await {
+                self.update_message_log(message_id, MessageStatus::Failed).await?;
+                return Err(error);
+            } else {
+                self.update_message_log(message_id, MessageStatus::Ok).await?;
+                return Ok(());
+            };
+            }
+
+        }
+        },
+        Message::Response { .. } => {
+        return Err(ClusterExceptions::UnkownClientRequest {
+            error_message: message_request.dest().unwrap().to_string(),
+        });
+        }
+    }
+    }
+
+    pub async fn poll_remote_responses(&mut self, remote_sender_id: &String) -> Result<Vec<Message>, ClusterExceptions> {
+        println!("In poll_remote");
+        let mut buffer: Vec<Message> = Vec::with_capacity(100);
+        let limit = 100;
+
+        match self.network_manager.network_response_readers.get(remote_sender_id.as_str()) {
+            Some(node_receiver) => {
+                println!("Now polling for response...");
+                let mut node_receiver_lock = node_receiver.lock().await;
+
+                // Wait for a response with a timeout
+                match timeout(Duration::from_secs(10), node_receiver_lock.recv()).await {
+                    Ok(messages) => {
+                        if let Some(vector_messages) = messages {
+                        println!("Remote TCP response: {:?}", vector_messages);
+                        return Ok(vector_messages);
+                        } else {
+                        return Err(ClusterExceptions::RemoteNodeRequestError { error_message: format!("Channel closed for node {}", remote_sender_id) });
+                        }
+                    },
+                    Err(_) => {
+                        return Err(ClusterExceptions::RemoteNodeRequestError {
+                            error_message: format!(
+                                "Timeout while waiting for response from node {}",
+                                remote_sender_id
+                            ),
+                        });
+                    }
+                }
+            }
+            None => {
+                println!("No connection to poll...");
+                return Err(ClusterExceptions::RemoteNodeRequestError {
+                    error_message: format!("Connection not found for node {}", remote_sender_id),
+                });
+            }
+        }
+    }
+
+    pub async fn process_remote(&mut self, message_id: usize, message_request: Message) -> Result<(), ClusterExceptions> {
+
+    let message_request_clone = message_request.clone();
+    let message_type = message_request_clone.msg_type().unwrap();
+
+    // TODO: Add TX loop to handle transaction type
+    // Loop should call complete transaction fn below
+    match message_type.as_str() {
+        "txn" => {
+        self.complete_transaction_remote(message_id, message_request).await?;
+        return Ok(());
+        },
+        _ => {
+        
+        let node_id = message_request_clone.dest().unwrap();
+
+        if let Some(remote_sending_channel) = &self.network_manager.network_request_writers.get(node_id) {
+
+                match remote_sending_channel.send(message_request.clone()).await {
+                Ok(()) => {
+                println!("Message sent to {}", node_id);
+                match self.poll_remote_responses(node_id).await {
+                    Ok(message_responses) => {
+                    println!("poll remote returned");
+
+                    for message_response in message_responses {
+                        match message_response.body().unwrap().is_ok() {
+                        true => {
+                            self.update_message_log(message_id, MessageStatus::Ok).await?;
+                        },
+                        false => {
+                            // If one of the responses from the remote node is a follow-up request, add this to the response queue
+                            //self.messenger.response_queue(message_response).await?;
+                            self.update_message_log(message_id, MessageStatus::Failed).await?;
+                        }
+                        };
+                    }
+                    return Ok(());
+                    },
+                    Err(error) => {
+                    println!("Send failed");
+                    return Err(ClusterExceptions::RemoteNodeRequestError { error_message: error.to_string() });
+                    }
+                };
+                },
+                Err(error) => {
+                println!("Remote request sent and err");
+                return Err(ClusterExceptions::RemoteNodeRequestError { error_message: error.to_string() });
+                }
+            } 
+            } else {
+            println!("No sending channel found for node {}", node_id);
+                return Err(ClusterExceptions::RemoteNodeRequestError { error_message: "no sending channel".to_string() });
+            }
+        }
+    };
+
+    }
+
+
+    pub async fn complete_transaction_remote(&mut self, message_id: usize, message_request: Message) -> Result<(), ClusterExceptions> {
+
+        let node_topology = self.get_nodes();
+        let transaction_id = self.transaction_manager.start_transaction(message_request.clone(), node_topology).await?;
+        let transaction_actions = self.transaction_manager.execute_transaction(message_request.dest().unwrap().clone(), transaction_id).await?;
+        let mut transaction_execution_error = None;
+
+        println!("Transaction actions: {:?}", transaction_actions);
+
+        for action in transaction_actions {
+
+        if let Some(transaction_message_request) = action.value {
+
+            let node_id = transaction_message_request.dest().unwrap();
+
+            if let Some(remote_sending_channel) = &self.network_manager.network_request_writers.get(node_id) {
+
+            match remote_sending_channel.send(transaction_message_request.clone()).await {
+                Ok(()) => {
+
+                match self.poll_remote_responses(node_id).await {
+                    Ok(message_responses) => {
+
+                    for message_response in message_responses {
+                        match message_response.body().unwrap().is_ok() {
+                        true => {
+                            ()
+                        },
+                        false => {
+                            // If one of the responses from the remote node is a follow-up request, add this to the response queue
+                            transaction_execution_error = Some(());
+                        }
+                        };
+                    }
+                    },
+                    Err(_error) => {
+                    transaction_execution_error = Some(());;
+                    }
+                };
+                },
+                Err(_error) => {
+                transaction_execution_error = Some(());;
+                }
+            } 
+        } else {
+            transaction_execution_error = Some(());;
+        }
+
+        }
+
+    };
+
+    if let None = transaction_execution_error {
+        self.transaction_manager.commit_transaction(transaction_id).await?;
+        self.update_message_log(message_id, MessageStatus::Ok).await?;
+        return Ok(())
+    } else {
+        self.update_message_log(message_id, MessageStatus::Failed).await?;
+        return Err(ClusterExceptions::TransactionError(TransactionExceptions::FailedToCommitTransaction { error_message: transaction_id.to_string() }));
+    }
+
+    }
+
+    pub async fn complete_transaction(&mut self, message_request: Message) -> Result<(), ClusterExceptions> {
+
+        let node_topology = self.get_nodes();
+
+        let transaction_id = self.transaction_manager.start_transaction(message_request.clone(), node_topology).await?;
+        let transaction_actions = self.transaction_manager.execute_transaction(message_request.dest().unwrap().clone(), transaction_id).await?;
+
+        let mut transaction_execution_error = None;
+
+        for action in transaction_actions {
+
+            if let Some(transaction_message_request) = action.value {
+            if let Err(_error) = self.messenger.request_queue(transaction_message_request).await {
+                transaction_execution_error = Some(())
+            }
+            }
+
+        };
+
+        if let None = transaction_execution_error {
+            self.transaction_manager.commit_transaction(transaction_id).await?;
             Ok(())
         } else {
-            return Err(ClusterExceptions::TransactionError(TransactionExceptions::TransactionNotFound));
+            return Err(ClusterExceptions::TransactionError(TransactionExceptions::FailedToCommitTransaction { error_message: transaction_id.to_string() }));
         }
+
     }
 
-    pub async fn abort_transaction(&mut self, transaction_id: usize) {
-        if let Some(transaction) = self.active_transactions.get_mut(&transaction_id) {
-            // Update WAL
-            self.wal
-                .lock()
-                .await
-                .write_entry(&WalEntry::TransactionAbort { transaction_id })
-                .expect("Failed to write to WAL");
+    pub async fn categorize_and_queue_transactions(&mut self, txn_message: Message) -> Result<(), ClusterExceptions> {
 
-            // Release locks and remove transaction
-            for key in &transaction.locks {
-                self.lock_manager.release_lock(key, transaction_id);
+        // TODO Assign msg_id based on global log and set status to out
+
+        self.complete_transaction(txn_message).await?;
+
+        // TODO If no error comes back, set status to ok in global log
+
+        Ok(())
+    }
+
+    pub async fn propagate_message(&mut self, message: Message) -> Result<(), ClusterExceptions> {
+
+        if let Some(requeue_node_id) = message.dest() {
+
+            match &self.nodes.contains_key(requeue_node_id) {
+                true => {
+                    self.messenger.request_queue(message.clone()).await?;
+                },
+                false => {
+                    let init_message = self.messenger.categorize(format!(r#"{{"type":"init","msg_id":1,"node_id":"{requeue_node_id}","node_ids":[]}}"#)).await?;
+                    self.messenger.response_queue(init_message).await?;
+                    self.messenger.response_queue(message.clone()).await?;
+                    // println!("In propagate {:?}", &self.messenger.message_responses.lock().await);
+                    ()
+                }
+                
+                }
+
+            } else {
+                // If the node does not exist, return an error
+                return Err(ClusterExceptions::NodeDoesNotExist {
+                    error_message: format!("{:?}", message),
+                });
             }
-            self.active_transactions.remove(&transaction_id);
-        }
+
+        Ok(())
     }
 
-    
+    pub async fn process_followups(&mut self) -> Result<(), ClusterExceptions> {
 
+        let cluster_messenger = self.messenger.clone();
+        let mut messenger_request_queue_lock = cluster_messenger.message_responses.lock().await;
+        while let Some(response_request) = messenger_request_queue_lock.pop_front() {
+            match response_request {
+                Message::Init { .. } => {
+                    self.process_initialization(response_request).await?;
+                },
+                Message::Request { .. } => {
+                self.messenger.request_queue(response_request).await?;
+                },
+                Message::Response { .. } => {
+                return Err(ClusterExceptions::UnkownClientRequest {
+                    error_message: response_request.dest().unwrap().to_string(),
+                });
+                }
+            }
+        }
+
+        Ok(())
+
+        }
+        
+
+    pub async fn recover_from_wal(transaction_manager: &mut TransactionManager<'_>, wal_path: &str) {
+    let entries = WriteAheadLog::replay(wal_path).expect("Failed to replay WAL");
+    for entry in entries {
+        match entry {
+            WalEntry::TransactionStart { transaction_id } => {
+                transaction_manager.active_transactions.insert(transaction_id, Transaction::new(transaction_id));
+            }
+            WalEntry::ActionLog { transaction_id, action, .. } => {
+                if let Some(transaction) = transaction_manager.active_transactions.get_mut(&transaction_id) {
+                    transaction.actions.push(action);
+                }
+            }
+            WalEntry::TransactionCommit { transaction_id } => {
+                transaction_manager.commit_transaction(transaction_id).await.ok();
+            }
+            WalEntry::TransactionAbort { transaction_id } => {
+                transaction_manager.abort_transaction(transaction_id).await;
+            }
+        }
+    }
+}
 }
 
 
@@ -919,7 +1358,6 @@ pub enum TransactionExceptions {
     FailedToUpdateWal { error_message: String },
     FailedToCommitTransaction { error_message: String },
     QueryPlanBuildError { error_message: String },
-    TransactionManagerNotInitialized { error_message: String },
 }
 
 
@@ -934,7 +1372,6 @@ impl fmt::Display for TransactionExceptions {
             TransactionExceptions::FailedToUpdateWal { error_message} => write!(f, "Failed to update WAL with transaction '{}'.", error_message),
             TransactionExceptions::FailedToCommitTransaction { error_message} => write!(f, "Failed to commit transaction '{}'.", error_message),
             TransactionExceptions::QueryPlanBuildError { error_message} => write!(f, "Failed to build query plan for command '{}'.", error_message),
-            TransactionExceptions::TransactionManagerNotInitialized { error_message} => write!(f, "Transaction manager not initialized: '{}'.", error_message),
         }
     }
 }
