@@ -7,6 +7,7 @@ use std::fmt;
 
 use crate::session_resources::exceptions::ClusterExceptions;
 use crate::session_resources::file_system::FileSystemType;
+use crate::session_resources::implementation::{ImplementationMode};
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct ClusterConfig {
@@ -33,7 +34,7 @@ pub struct Network {
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct ClusterSettings {
-    pub execution_mode: String,
+    pub execution_mode: ImplementationMode,
 }
 
 impl ClusterConfig {

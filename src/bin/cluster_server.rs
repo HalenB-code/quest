@@ -1,6 +1,6 @@
 mod session_resources;
 use std::io;
-use crate::session_resources::implementation::{MessageExecutionType, Implementation};
+use crate::session_resources::implementation::{MessageExecutionType};
 use crate::session_resources::cluster::Cluster;
 use crate::session_resources::session::Session;
 
@@ -14,7 +14,6 @@ async fn main() {
   let source_path = args[1].clone();
   let establish_network = args[2].clone().parse::<bool>().unwrap();
 
-  let implementation: Implementation = Implementation::EAGER;
   let message_execution_target = MessageExecutionType::StdOut;
   let (external_tx, external_rx) = mpsc::channel::<String>(100);
 
@@ -34,7 +33,7 @@ async fn main() {
   // TODO
   // Establish network here
  
-  let mut session = Session::new(cluster, implementation, external_tx.clone());
+  let mut session = Session::new(cluster, external_tx.clone());
   
   tokio::spawn(async move {
     session.session_execution().await;

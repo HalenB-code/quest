@@ -3,6 +3,9 @@ use serde_json::Result;
 use std::fmt;
 use std::collections::HashMap;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MsgKind { Control, Task }
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(untagged, rename_all = "lowercase")]
 pub enum Message {
@@ -760,6 +763,31 @@ impl fmt::Display for MessageStatus {
 }
 
 impl Message {
+
+    pub fn kind(&self) -> MsgKind {
+            use Message::*;
+            use MessageType::*;
+
+            match self {
+                Init { .. } => MsgKind::Control,
+                Request { body, .. } | Response { body, .. } => match body {
+                    // Control-plane
+                    Topology { .. }
+                    | TopologyOk { .. }
+                    | TcpConnectOk { .. }
+                    | HealthCheck { .. }
+                    | HealthCheckOk { .. }
+                    | LogNodeMessages { .. }
+                    | LogNodeMessagesOk { .. }
+                    | LogClusterMessages { .. }
+                    | LogClusterMessagesOk { .. } => MsgKind::Control,
+
+                    // Everything else is task/data-plane for now
+                    _ => MsgKind::Task,
+                }
+            }
+    }
+
     pub fn default_request_message(message_type: &str) -> Option<Self> {
         match message_type {
             "Transaction" => Some(Message::Request { 

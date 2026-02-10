@@ -1,4 +1,4 @@
-use crate::session_resources::message::{Message, MessageType, MessageFields, MessageStatus};
+use crate::session_resources::message::{Message, MessageFields, MessageStatus, MessageType, MsgKind};
 use std::collections::{HashMap, BTreeMap};
 use crate::session_resources::node::Node;
 use crate::session_resources::implementation::MessageExecutionType;
@@ -12,10 +12,11 @@ use crate::session_resources::network::{NetworkManager, NodeType};
 use crate::session_resources::message;
 use crate::session_resources::implementation::StdOut;
 use crate::session_resources::cli::ClusterCommand;
-use crate::session_resources::message::message_serializer;
+use crate::session_resources::message::{message_serializer, message_deserializer};
 use crate::session_resources::write_ahead_log::{WriteAheadLog, WalEntry};
 use crate::session_resources::transactions::Transaction;
 use crate::session_resources::transactions::Action;
+use crate::session_resources::implementation::ImplementationMode;
 
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
@@ -361,73 +362,130 @@ impl Cluster {
 
 
     pub async fn categorize_and_queue(&mut self, incoming_message: String) -> Result<(), ClusterExceptions> {
+        println!("Incoming message {}", incoming_message.clone());
+        
+        // Mapping incoming string to ClusterCommand type
+        // Intention here is to be able to receive command line inputs that can be parsed and configured into the corresponding message (read RPC type) for internal use
+        // let mapped_message = ClusterCommand::map_command_line_request(incoming_message)?;
+        let mut mapped_message = message_deserializer(&incoming_message)?;
+        let message_id = self.insert_message_log(mapped_message.clone()).await?;
 
-        let mapped_message = ClusterCommand::map_command_line_request(incoming_message)?;
+        if OVERWRITE_INCOMING_MSG_ID {
+              mapped_message.set_msg_id(message_id);
+        }
 
-        let transaction_manager = self.transaction_manager.as_mut().unwrap();
+        match mapped_message.kind() {
+            MsgKind::Control => {
+                // On the control plane, we are currently accommodating log cluster messages and initialization messages.
+                // Log messages will write to std out, and init will trigger the cluster initialization that will have follow-up requests for things like network and file system setup
+                match mapped_message.msg_type().unwrap().as_str() {
+                    "log_cluster_messages" => {
+                        if let Ok(()) = self.log_messages() {
+                            let message_response = Message::Response {
+                            src: mapped_message.dest().unwrap().to_string(),
+                            dest: mapped_message.src().unwrap().to_string(),
+                            body: MessageType::LogClusterMessagesOk {
+                            }
+                        };
+                            self.cluster_response(message_response)?;
+                        }            
+                    },
+                    "init" => {
+                    self.process_local(message_id, mapped_message.clone()).await?;
+                    }
+                    _ => {
+                    }
+                };
 
-        transaction_manager.query_plan.add_step(mapped_message).await?;
+                // While in this block, allow for any follow-ups to be processed
+                self.process_followups().await?;
+                return Ok(());
+            },
+            MsgKind::Task => {
+                // Here we are dealing with messages that are on the data plane
+                // These may be local or remote and should be routed accordingly
 
-        // TODO: Lazy vs Eager execution handling from cluster config
-        // For eager execution, execute immediately
-        // Assuming eager for now
+                // We also have an implementation mode to consider: eager or lazy
+                // Eager: execute each message immediately
+                // Lazy: Add to the transaction_manager.query_plan and execute on specific requests
 
-        let latest_query_step = transaction_manager.query_plan.get_latest_query_step();
+                match self.cluster_configuration.cluster_settings.execution_mode {
+                    ImplementationMode::EAGER => {
+                        println!("Eager execution mode selected");
 
-        let mut latest_query_step_messages: HashMap<usize, (String, QueryPlanTypes, Message, QueryPlanStatus)> = transaction_manager.query_plan.query_plan_steps.get(&latest_query_step).unwrap().clone();
+                        if let Some(_destination) = mapped_message.dest() {
 
-        for (step_id, sub_steps) in latest_query_step_messages.iter_mut() {
+                            if let Some((_node, node_type)) = self.network_manager.network_map.get(mapped_message.dest().unwrap()) {
+                                match node_type {
+                                    NodeType::Local => {
+                                    self.process_local(message_id, mapped_message.clone()).await?;
+                                    },
+                                    NodeType::Remote => {
+                                    self.process_remote(message_id, mapped_message.clone()).await?;
+                                    }
+                                }
+                            } else {
+                                // If request is init or another type, we don't need confirmation node exists
+                                self.update_message_log(message_id, MessageStatus::Failed).await?;
+                                return Err(ClusterExceptions::NodeDoesNotExist { error_message: mapped_message.dest().unwrap().clone() });
+                            }
+                        };
+                        self.process_followups().await?;
+                        return Ok(());
+                    },
+                    ImplementationMode::LAZY => {
 
-          let message_request = &mut sub_steps.2;
+                        
+                        println!("Lazy execution mode selected");
 
-          let message_id = self.insert_message_log(message_request.clone()).await?;
+                        let cluster_command = ClusterCommand::map_command_line_request(incoming_message)?;
 
-          if OVERWRITE_INCOMING_MSG_ID {
-              message_request.set_msg_id(message_id);
-          }
+                        let transaction_manager = self.transaction_manager.as_mut().unwrap();
 
-          match message_request.dest() {
-              None => {
-              println!("{:?}", message_request.msg_type().unwrap());
-              match message_request.msg_type().unwrap().as_str() {
-                  "log_cluster_messages" => {
-                  
-                  if let Ok(()) = self.log_messages() {
-                      let message_response = Message::Response {
-                      src: message_request.dest().unwrap().to_string(),
-                      dest: message_request.src().unwrap().to_string(),
-                      body: MessageType::LogClusterMessagesOk {
-                      }
-                  };
-                      self.cluster_response(message_response)?;
-                  }            
-                  },
-                  "init" => {
-                  self.process_local(message_id, message_request.clone()).await?;
-                  }
-                  _ => {
-                  }
-              }
-              },
-              Some(_destination) => {
-              if let Some((_node, node_type)) = self.network_manager.network_map.get(message_request.dest().unwrap()) {
-                  match node_type {
-                      NodeType::Local => {
-                      self.process_local(message_id, message_request.clone()).await?;
-                      },
-                      NodeType::Remote => {
-                      self.process_remote(message_id, message_request.clone()).await?;
-                      }
-                  }
-              } else {
-                  // If request is init or another type, we don't need confirmation node exists
-                  self.update_message_log(message_id, MessageStatus::Failed).await?;
-                  return Err(ClusterExceptions::NodeDoesNotExist { error_message: message_request.dest().unwrap().clone() });
-              }
-              }
-          }
+                        transaction_manager.query_plan.add_step(cluster_command).await?;
 
+                        let latest_query_step = transaction_manager.query_plan.get_latest_query_step();
 
+                        // TODO: Add ClusterCommand type to empty the query plan
+
+                        let mut latest_query_step_messages: HashMap<usize, (String, QueryPlanTypes, Message, QueryPlanStatus)> = transaction_manager.query_plan.query_plan_steps.get(&latest_query_step).unwrap().clone();
+
+                        for (_step_id, sub_steps) in latest_query_step_messages.iter_mut() {
+
+                            let message_request = &mut sub_steps.2;
+
+                                let message_id = self.insert_message_log(message_request.clone()).await?;
+
+                                if OVERWRITE_INCOMING_MSG_ID {
+                                    message_request.set_msg_id(message_id);
+                                }
+
+                                match message_request.dest() {
+                                    None => {
+                                        return Err(ClusterExceptions::InvalidCommand { error_message: format!("Message in query plan must have a target: {}", message_request.dest().unwrap().clone()) });
+                                    },
+                                    Some(_destination) => {
+                                    if let Some((_node, node_type)) = self.network_manager.network_map.get(message_request.dest().unwrap()) {
+                                        match node_type {
+                                            NodeType::Local => {
+                                            self.process_local(message_id, message_request.clone()).await?;
+                                            },
+                                            NodeType::Remote => {
+                                            self.process_remote(message_id, message_request.clone()).await?;
+                                            }
+                                        }
+                                    } else {
+                                        // If request is init or another type, we don't need confirmation node exists
+                                        self.update_message_log(message_id, MessageStatus::Failed).await?;
+                                        return Err(ClusterExceptions::NodeDoesNotExist { error_message: message_request.dest().unwrap().clone() });
+                                    }
+                                    }
+                                }
+                    }
+                }
+
+            }
+        }
 
         }
         

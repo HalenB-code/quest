@@ -282,8 +282,8 @@ impl QueryPlan {
     }
 
     pub fn get_latest_query_step(&mut self) -> usize {
-        if let Some(last_entry_id) =  self.query_plan_steps.last_entry().key() {
-        return *last_entry_id;
+        if let Some(last_entry_id) =  self.query_plan_steps.last_key_value() {
+        return *last_entry_id.0;
         } else {
             return 0;
         }

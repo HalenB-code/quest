@@ -4,8 +4,8 @@ use std::io::Write;
 
 // These implementations need to be back by a implementation model that reflects the type
 
-#[derive(Debug, Clone)]
-pub enum Implementation {
+#[derive(serde::Deserialize, Debug, Clone)]
+pub enum ImplementationMode {
     EAGER,
     LAZY
   }

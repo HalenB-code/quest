@@ -9,4 +9,4 @@ orchestrator_port = "7777"
 layout = {1={name="node-1",port="7778"}, 2={name="node-2",port="7779"}}
 
 [cluster_settings]
-execution_mode = "eager"
+execution_mode = "EAGER"
