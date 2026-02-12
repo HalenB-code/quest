@@ -179,7 +179,7 @@ impl NetworkManager {
                     }
                 }
 
-                all_nodes_exist = if &self.network_response_readers.len() == &self.network_map.len() { false } else { true };
+                all_nodes_exist = self.network_response_readers.len() < self.network_map.len();
 
             };
             

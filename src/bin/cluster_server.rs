@@ -23,6 +23,18 @@ async fn main() {
       match cluster.network_manager.create_network().await {
           Ok(()) => {
             println!("Network up");
+            // IMPORTANT: collect keys first to avoid borrow issues
+            let node_ids: Vec<String> = cluster
+                .network_manager
+                .network_response_readers
+                .keys()
+                .cloned()
+                .collect();
+
+            for node_id in node_ids {
+                println!("Starting response listener for {}", node_id);
+                cluster.start_response_listener(node_id).await;
+            }
           }
           Err(error) => {
               println!("Error erecting network {:?}", error);

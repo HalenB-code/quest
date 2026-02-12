@@ -747,6 +747,7 @@ impl fmt::Display for MessageExceptions {
 
 #[derive(Debug, Clone)]
 pub enum MessageStatus {
+    Sent,
     Pending,
     Failed,
     Ok
@@ -755,6 +756,7 @@ pub enum MessageStatus {
 impl fmt::Display for MessageStatus {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            MessageStatus::Sent { .. } => write!(f, "sent"),
             MessageStatus::Pending { .. } => write!(f, "pending"),
             MessageStatus::Failed { .. } => write!(f, "fail"),
             MessageStatus::Ok { .. } => write!(f, "ok"),

@@ -56,6 +56,7 @@ impl Cluster {
     let network_layout = &cluster_config.network;
 
     let network_manager = NetworkManager::new(network_layout, outgoing_message_handler, cluster_config.working_directory.local_path.clone(), establish_network);
+
     let mut nodes = BTreeMap::new();
     let other_nodes = network_manager.network_map.clone().into_keys().collect::<Vec<String>>();
     let network_map = network_manager.network_map.clone();
@@ -94,7 +95,39 @@ impl Cluster {
     let transaction_manager = TransactionManager::new(wal_path.clone().as_str(), cluster_context);
     cluster.transaction_manager = Some(transaction_manager);
     return cluster;
+
   }
+
+    pub async fn start_response_listener(&self, node_id: String) {
+
+        let reader = match self
+            .network_manager
+            .network_response_readers
+            .get(&node_id)
+        {
+            Some(r) => r.clone(),
+            None => return,
+        };
+
+        let mut messenger = self.messenger.clone();
+
+        tokio::spawn(async move {
+            let mut lock = reader.lock().await;
+
+            while let Some(messages) = lock.recv().await {
+                for msg in messages {
+                    if let Err(e) = messenger.response_queue(msg).await {
+                        println!(
+                            "Failed to enqueue response for {}: {:?}",
+                            node_id, e
+                        );
+                    }
+                }
+            }
+
+            println!("Response listener closed for {}", node_id);
+        });
+    }
 
 
   pub async fn process_initialization(&mut self, init_request_message: Message) -> Result<(), ClusterExceptions> {
@@ -493,50 +526,82 @@ impl Cluster {
         
     }
 
+    
     pub async fn process_local(&mut self, message_id: usize, message_request: Message) -> Result<(), ClusterExceptions> {
 
-    match message_request {
+        match message_request {
 
-        Message::Init { .. } => {
-            if let Err(error) = self.process_initialization(message_request).await {
-            self.update_message_log(message_id, MessageStatus::Failed).await?;
-            return Err(error);
-            } else {
-            self.update_message_log(message_id, MessageStatus::Ok).await?;
-            return Ok(());
-            };
-        },
-        Message::Request { .. } => {
-        match message_request.msg_type().unwrap().as_str() {
-            "txn" => {
-            if let Err(error) = self.categorize_and_queue_transactions(message_request).await {
+            Message::Init { .. } => {
+                if let Err(error) = self.process_initialization(message_request).await {
                 self.update_message_log(message_id, MessageStatus::Failed).await?;
                 return Err(error);
-            } else {
+                } else {
                 self.update_message_log(message_id, MessageStatus::Ok).await?;
                 return Ok(());
-            };
+                };
             },
-            _ => {
-            if let Err(error) = self.messenger.request_queue(message_request).await {
-                self.update_message_log(message_id, MessageStatus::Failed).await?;
-                return Err(error);
-            } else {
+            Message::Request { .. } => {
+                match message_request.msg_type().unwrap().as_str() {
+                    "txn" => {
+                    if let Err(error) = self.categorize_and_queue_transactions(message_request).await {
+                        self.update_message_log(message_id, MessageStatus::Failed).await?;
+                        return Err(error);
+                    } else {
+                        self.update_message_log(message_id, MessageStatus::Ok).await?;
+                        return Ok(());
+                    };
+                    },
+                    _ => {
+                    if let Err(error) = self.messenger.request_queue(message_request).await {
+                        self.update_message_log(message_id, MessageStatus::Failed).await?;
+                        return Err(error);
+                    } else {
+                        self.update_message_log(message_id, MessageStatus::Ok).await?;
+                        return Ok(());
+                    };
+                    }
+
+                }
+            },
+            Message::Response { .. } => {
+                // TODO: What do we do with responses?
+                // self.handle_response(message_request).await?;
                 self.update_message_log(message_id, MessageStatus::Ok).await?;
-                return Ok(());
-            };
+                Ok(())
             }
-
-        }
-        },
-        Message::Response { .. } => {
-        return Err(ClusterExceptions::UnkownClientRequest {
-            error_message: message_request.dest().unwrap().to_string(),
-        });
         }
     }
+
+    pub async fn process_remote(
+        &mut self,
+        message_id: usize,
+        message_request: Message
+    ) -> Result<(), ClusterExceptions> {
+
+        let node_id = message_request.dest()
+            .ok_or_else(|| ClusterExceptions::InvalidCommand {
+                error_message: "Remote message missing dest".into()
+            })?;
+
+        let sender = self.network_manager
+            .network_request_writers
+            .get(node_id)
+            .ok_or_else(|| ClusterExceptions::RemoteNodeRequestError {
+                error_message: "no sending channel".into()
+            })?;
+
+        sender.send(message_request.clone()).await
+            .map_err(|e| ClusterExceptions::RemoteNodeRequestError {
+                error_message: e.to_string()
+            })?;
+
+        // Mark as SENT — completion will happen when responses flow in
+        self.update_message_log(message_id, MessageStatus::Sent).await?;
+
+        Ok(())
     }
 
+    #[deprecated = "Use async response listener instead"]
     pub async fn poll_remote_responses(&mut self, remote_sender_id: &String) -> Result<Vec<Message>, ClusterExceptions> {
         println!("In poll_remote");
         let mut buffer: Vec<Message> = Vec::with_capacity(100);
@@ -576,7 +641,7 @@ impl Cluster {
         }
     }
 
-    pub async fn process_remote(&mut self, message_id: usize, message_request: Message) -> Result<(), ClusterExceptions> {
+    pub async fn _process_remote(&mut self, message_id: usize, message_request: Message) -> Result<(), ClusterExceptions> {
 
     let message_request_clone = message_request.clone();
     let message_type = message_request_clone.msg_type().unwrap();
@@ -784,28 +849,30 @@ impl Cluster {
     }
 
     pub async fn process_followups(&mut self) -> Result<(), ClusterExceptions> {
-
         let cluster_messenger = self.messenger.clone();
-        let mut messenger_request_queue_lock = cluster_messenger.message_responses.lock().await;
-        while let Some(response_request) = messenger_request_queue_lock.pop_front() {
-            match response_request {
-                Message::Init { .. } => {
-                    self.process_initialization(response_request).await?;
-                },
-                Message::Request { .. } => {
-                self.messenger.request_queue(response_request).await?;
-                },
+
+        // Drain quickly under the lock
+        let mut drained = Vec::new();
+        {
+            let mut lock = cluster_messenger.message_responses.lock().await;
+            while let Some(m) = lock.pop_front() {
+                drained.push(m);
+            }
+        } // lock dropped here
+
+        // Now process without holding the lock
+        for msg in drained {
+            match msg {
+                Message::Init { .. } => self.process_initialization(msg).await?,
+                Message::Request { .. } => self.messenger.request_queue(msg).await?,
                 Message::Response { .. } => {
-                return Err(ClusterExceptions::UnkownClientRequest {
-                    error_message: response_request.dest().unwrap().to_string(),
-                });
+                    // TODO: DO NOT error: route to response handler
+                    // self.handle_response(msg).await?;
                 }
             }
         }
-
         Ok(())
-
-        }
+    }
 
     pub async fn recover_from_wal(transaction_manager: &mut TransactionManager, wal_path: &str) {
         let entries = WriteAheadLog::replay(wal_path).expect("Failed to replay WAL");

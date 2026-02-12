@@ -3,12 +3,14 @@ use std::collections::{HashMap, VecDeque};
 use crate::session_resources::exceptions::ClusterExceptions;
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[derive(Debug, Clone)]
 pub struct Messenger {
     pub message_requests: Arc<Mutex<VecDeque<Message>>>,
     pub message_responses: Arc<Mutex<VecDeque<Message>>>,
-    pub message_record: HashMap<usize, Message>
+    pub message_record: Arc<Mutex<HashMap<usize, Message>>>,
+    pub next_id: Arc<AtomicUsize>
 }
 
 impl Messenger {
@@ -16,7 +18,8 @@ impl Messenger {
         Self { 
             message_requests: Arc::new(Mutex::new(VecDeque::new())), 
             message_responses: Arc::new(Mutex::new(VecDeque::new())), 
-            message_record: HashMap::new( ) 
+            message_record: Arc::new(Mutex::new(HashMap::new())),
+            next_id: Arc::new(AtomicUsize::new(1)) 
         }
     }
 
@@ -25,42 +28,40 @@ impl Messenger {
         Ok(message_request)
     }
 
-    pub async fn request_queue(&mut self, incoming_request: Message) -> Result<(), ClusterExceptions> {
+    pub async fn request_queue(&self, incoming_request: Message)
+        -> Result<(), ClusterExceptions>
+    {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
 
-        let message_ref = self.message_record
-        .keys()
-        .max()
-        .unwrap_or(&0_usize) + 1;
-
-        self.message_record
-        .insert(message_ref, incoming_request.clone());
+        {
+            let mut record = self.message_record.lock().await;
+            record.insert(id, incoming_request.clone());
+        }
 
         self.message_requests
-        .lock()
-        .await
-        .push_back(incoming_request);
+            .lock()
+            .await
+            .push_back(incoming_request);
 
         Ok(())
-
     }
 
-    pub async fn response_queue(&mut self, incoming_request: Message) -> Result<(), ClusterExceptions> {
+    pub async fn response_queue(&self, incoming_request: Message)
+        -> Result<(), ClusterExceptions>
+    {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
 
-        let message_ref = self.message_record
-        .keys()
-        .max()
-        .unwrap_or(&0_usize) + 1;
-
-        self.message_record
-        .insert(message_ref, incoming_request.clone());
+        {
+            let mut record = self.message_record.lock().await;
+            record.insert(id, incoming_request.clone());
+        }
 
         self.message_responses
-        .lock()
-        .await
-        .push_back(incoming_request);
+            .lock()
+            .await
+            .push_back(incoming_request);
 
         Ok(())
-
     }
 
     pub async fn dequeue(&mut self) -> Option<Message> {
@@ -69,8 +70,8 @@ impl Messenger {
         let next_message = queue.pop_front();
     
         if let Some(message) = &next_message {
-            let message_ref = self.message_record.keys().max().unwrap_or(&0_usize) + 1;
-            self.message_record.insert(message_ref, message.clone());
+            let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+            self.message_record.lock().await.insert(id, message.clone());
         }
         next_message
     }
