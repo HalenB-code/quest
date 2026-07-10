@@ -64,7 +64,7 @@ impl Cluster {
     let init_request = message::message_deserializer(&format!(r#"{{"type":"init","msg_id":0,"node_id":"node-master","node_ids":{:?}}}"#, other_nodes)).expect("Expecting correct init request structure");
     let virtual_remote_node = Node::create(&init_request, &cluster_config.working_directory.local_path.clone()).await;
     nodes.insert("node-master".to_string(), virtual_remote_node);
-    
+
     if establish_network {
 
       for (node_id, (node_port, node_type)) in network_map {
@@ -451,22 +451,35 @@ impl Cluster {
 
                 if let Some(_destination) = mapped_message.dest() {
 
-                    if let Some((_node, node_type)) = self.network_manager.network_map.get(mapped_message.dest().unwrap()) {
-                        match node_type {
-                            NodeType::Local => {
-                            self.process_local(message_id, mapped_message.clone()).await?;
-                            },
-                            NodeType::Remote => {
-                            println!("Here");
-                            self.process_remote(message_id, mapped_message.clone()).await?;
+                    // Need to differentiate between response oks and response requests
+                    // TODO: Change unwrap to proper error handling
+                    match mapped_message.body().unwrap().is_ok() {
+                        true => {
+                            self.update_message_log(message_id, MessageStatus::Ok).await?;
+                            return Ok(());
+                        },
+                        false => {
+                            if let Some((_node, node_type)) = self.network_manager.network_map.get(mapped_message.dest().unwrap()) {
+                            match node_type {
+                                NodeType::Local => {
+                                self.process_local(message_id, mapped_message.clone()).await?;
+                                },
+                                NodeType::Remote => {
+                                println!("Here");
+                                self.process_remote(message_id, mapped_message.clone()).await?;
+                                }
+                            }
+                            } else {
+                                // If request is init or another type, we don't need confirmation node exists
+                                self.update_message_log(message_id, MessageStatus::Failed).await?;
+                                return Err(ClusterExceptions::InvalidCommand { error_message: format!("Invalid command for node: {}", mapped_message.dest().unwrap().clone()) });
                             }
                         }
-                    } else {
-                        // If request is init or another type, we don't need confirmation node exists
-
-                        self.update_message_log(message_id, MessageStatus::Failed).await?;
-                        return Err(ClusterExceptions::NodeDoesNotExist { error_message: mapped_message.dest().unwrap().clone() });
                     }
+                } else {
+                                // If request is init or another type, we don't need confirmation node exists
+                                self.update_message_log(message_id, MessageStatus::Failed).await?;
+                                return Err(ClusterExceptions::NodeDoesNotExist { error_message: mapped_message.dest().unwrap().clone() });
                 };
                 self.process_followups().await?;
                 return Ok(());
