@@ -29,14 +29,13 @@ use tokio::time::{timeout, Duration};
 use super::message::MessageTypeFields;
 
 // const WAL_PATH: &str = r"C:\rust\projects\rust-bdc";
-const OVERWRITE_INCOMING_MSG_ID: bool = true;
+const OVERWRITE_INCOMING_MSG_ID: bool = false;
 
 // Cluster Class
 // Collection of nodes that will interact to achieve a task
 #[derive(Debug, Clone)]
 pub struct Cluster {
     pub cluster_id: String,
-    pub receiving_channel: Arc<Mutex<mpsc::Receiver<String>>>,
     pub execution_target: MessageExecutionType,
     pub messenger: Messenger,
     pub nodes: BTreeMap<String, Node>,
@@ -48,19 +47,24 @@ pub struct Cluster {
 }
 
 impl Cluster {
-  pub async fn create(cluster_reference: usize, outgoing_message_handler: mpsc::Sender<String>, incoming_message_handler: mpsc::Receiver<String>, execution_target: MessageExecutionType, source_path: String, establish_network: bool) -> Self {
+  pub async fn create(cluster_reference: usize, outgoing_message_handler: mpsc::Sender<String>, execution_target: MessageExecutionType, source_path: String, establish_network: bool) -> Self {
 
     let cluster_config = ClusterConfig::read_config(source_path);
     let wal_path = &cluster_config.working_directory.wal_path;
     let file_system_accessibility = &cluster_config.working_directory.file_system_type;
     let network_layout = &cluster_config.network;
 
-    let network_manager = NetworkManager::new(network_layout, outgoing_message_handler, cluster_config.working_directory.local_path.clone(), establish_network);
+    let network_manager = NetworkManager::new(network_layout, outgoing_message_handler.clone(), cluster_config.working_directory.local_path.clone(), establish_network);
 
     let mut nodes = BTreeMap::new();
     let other_nodes = network_manager.network_map.clone().into_keys().collect::<Vec<String>>();
     let network_map = network_manager.network_map.clone();
 
+    // Insert cluster-orchestrator node into the cluster
+    let init_request = message::message_deserializer(&format!(r#"{{"type":"init","msg_id":0,"node_id":"node-master","node_ids":{:?}}}"#, other_nodes)).expect("Expecting correct init request structure");
+    let virtual_remote_node = Node::create(&init_request, &cluster_config.working_directory.local_path.clone()).await;
+    nodes.insert("node-master".to_string(), virtual_remote_node);
+    
     if establish_network {
 
       for (node_id, (node_port, node_type)) in network_map {
@@ -79,9 +83,8 @@ impl Cluster {
 
     let mut cluster: Cluster = Cluster {
       cluster_id: format!("cluster-{cluster_reference}"), 
-      receiving_channel: Arc::new(Mutex::new(incoming_message_handler)),
       execution_target,
-      messenger: Messenger::create(), 
+      messenger: Messenger::create(outgoing_message_handler), 
       nodes,
       transaction_manager: None,
       cluster_configuration: cluster_config.clone(),
@@ -189,23 +192,23 @@ impl Cluster {
   Ok(())
   }
 
-  pub async fn run(&mut self) -> Result<(), ClusterExceptions> {
+//   pub async fn run(&mut self) -> Result<(), ClusterExceptions> {
     
-    // Clone the Arc for the receiving channel
-    let receiver_clone = Arc::clone(&self.receiving_channel);
+//     // Clone the Arc for the receiving channel
+//     let receiver_clone = Arc::clone(&self.receiving_channel);
 
-    // Lock the receiver (this avoids the temporary value issue)
-    let mut rx = receiver_clone.lock().await;
+//     // Lock the receiver (this avoids the temporary value issue)
+//     let mut rx = receiver_clone.lock().await;
     
-    // TODO: Lazy vs Eager execution handling from cluster config
-    while let Some(incoming_message) = rx.recv().await {
-      self.categorize_and_queue(incoming_message).await?;
-      // Process follow-ups with a slight delay if none exist
-      self.process_followups().await?;
-    }
+//     // TODO: Lazy vs Eager execution handling from cluster config
+//     while let Some(incoming_message) = rx.recv().await {
+//       self.categorize_and_queue(incoming_message).await?;
+//       // Process follow-ups with a slight delay if none exist
+//       self.process_followups().await?;
+//     }
     
-    Ok(())
-  }
+//     Ok(())
+//   }
 
   pub fn remove(mut self, node: Node) -> Result<(), ClusterExceptions> {
 
@@ -370,19 +373,26 @@ impl Cluster {
 
         match message_status {
             MessageStatus::Ok => {
-            self.node_message_log
-            .entry(message_id)
-            .and_modify(|(_key, value)| {
-                *value = MessageStatus::Ok.to_string();
-            });
+                self.node_message_log
+                .entry(message_id)
+                .and_modify(|(_key, value)| {
+                    *value = MessageStatus::Ok.to_string();
+                });
             },
             MessageStatus::Failed => {
-            self.node_message_log
-            .entry(message_id)
-            .and_modify(|(_key, value)| {
-                *value = MessageStatus::Failed.to_string();
-            });
-            }
+                self.node_message_log
+                .entry(message_id)
+                .and_modify(|(_key, value)| {
+                    *value = MessageStatus::Failed.to_string();
+                });
+            },
+            MessageStatus::Sent => {
+                self.node_message_log
+                .entry(message_id)
+                .and_modify(|(_key, value)| {
+                    *value = MessageStatus::Sent.to_string();
+                });
+            },
             _ => {
             return Err(ClusterExceptions::MessageStatusNotUpdated {
                 error_message: message_id.to_string(),
@@ -408,6 +418,7 @@ impl Cluster {
         }
 
         match mapped_message.kind() {
+            
             MsgKind::Control => {
                 // On the control plane, we are currently accommodating log cluster messages and initialization messages.
                 // Log messages will write to std out, and init will trigger the cluster initialization that will have follow-up requests for things like network and file system setup
@@ -438,93 +449,31 @@ impl Cluster {
                 // Here we are dealing with messages that are on the data plane
                 // These may be local or remote and should be routed accordingly
 
-                // We also have an implementation mode to consider: eager or lazy
-                // Eager: execute each message immediately
-                // Lazy: Add to the transaction_manager.query_plan and execute on specific requests
+                if let Some(_destination) = mapped_message.dest() {
 
-                match self.cluster_configuration.cluster_settings.execution_mode {
-                    ImplementationMode::EAGER => {
-                        println!("Eager execution mode selected");
-
-                        if let Some(_destination) = mapped_message.dest() {
-
-                            if let Some((_node, node_type)) = self.network_manager.network_map.get(mapped_message.dest().unwrap()) {
-                                match node_type {
-                                    NodeType::Local => {
-                                    self.process_local(message_id, mapped_message.clone()).await?;
-                                    },
-                                    NodeType::Remote => {
-                                    self.process_remote(message_id, mapped_message.clone()).await?;
-                                    }
-                                }
-                            } else {
-                                // If request is init or another type, we don't need confirmation node exists
-                                self.update_message_log(message_id, MessageStatus::Failed).await?;
-                                return Err(ClusterExceptions::NodeDoesNotExist { error_message: mapped_message.dest().unwrap().clone() });
+                    if let Some((_node, node_type)) = self.network_manager.network_map.get(mapped_message.dest().unwrap()) {
+                        match node_type {
+                            NodeType::Local => {
+                            self.process_local(message_id, mapped_message.clone()).await?;
+                            },
+                            NodeType::Remote => {
+                            println!("Here");
+                            self.process_remote(message_id, mapped_message.clone()).await?;
                             }
-                        };
-                        self.process_followups().await?;
-                        return Ok(());
-                    },
-                    ImplementationMode::LAZY => {
+                        }
+                    } else {
+                        // If request is init or another type, we don't need confirmation node exists
 
-                        
-                        println!("Lazy execution mode selected");
-
-                        let cluster_command = ClusterCommand::map_command_line_request(incoming_message)?;
-
-                        let transaction_manager = self.transaction_manager.as_mut().unwrap();
-
-                        transaction_manager.query_plan.add_step(cluster_command).await?;
-
-                        let latest_query_step = transaction_manager.query_plan.get_latest_query_step();
-
-                        // TODO: Add ClusterCommand type to empty the query plan
-
-                        let mut latest_query_step_messages: HashMap<usize, (String, QueryPlanTypes, Message, QueryPlanStatus)> = transaction_manager.query_plan.query_plan_steps.get(&latest_query_step).unwrap().clone();
-
-                        for (_step_id, sub_steps) in latest_query_step_messages.iter_mut() {
-
-                            let message_request = &mut sub_steps.2;
-
-                                let message_id = self.insert_message_log(message_request.clone()).await?;
-
-                                if OVERWRITE_INCOMING_MSG_ID {
-                                    message_request.set_msg_id(message_id);
-                                }
-
-                                match message_request.dest() {
-                                    None => {
-                                        return Err(ClusterExceptions::InvalidCommand { error_message: format!("Message in query plan must have a target: {}", message_request.dest().unwrap().clone()) });
-                                    },
-                                    Some(_destination) => {
-                                    if let Some((_node, node_type)) = self.network_manager.network_map.get(message_request.dest().unwrap()) {
-                                        match node_type {
-                                            NodeType::Local => {
-                                            self.process_local(message_id, message_request.clone()).await?;
-                                            },
-                                            NodeType::Remote => {
-                                            self.process_remote(message_id, message_request.clone()).await?;
-                                            }
-                                        }
-                                    } else {
-                                        // If request is init or another type, we don't need confirmation node exists
-                                        self.update_message_log(message_id, MessageStatus::Failed).await?;
-                                        return Err(ClusterExceptions::NodeDoesNotExist { error_message: message_request.dest().unwrap().clone() });
-                                    }
-                                    }
-                                }
+                        self.update_message_log(message_id, MessageStatus::Failed).await?;
+                        return Err(ClusterExceptions::NodeDoesNotExist { error_message: mapped_message.dest().unwrap().clone() });
                     }
-                }
-
+                };
+                self.process_followups().await?;
+                return Ok(());
             }
         }
-
-        }
-        
-        Ok(())
-        
     }
+        
 
     
     pub async fn process_local(&mut self, message_id: usize, message_request: Message) -> Result<(), ClusterExceptions> {
@@ -596,6 +545,7 @@ impl Cluster {
             })?;
 
         // Mark as SENT — completion will happen when responses flow in
+        println!("{:?}", self.node_message_log.clone());
         self.update_message_log(message_id, MessageStatus::Sent).await?;
 
         Ok(())

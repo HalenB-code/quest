@@ -79,7 +79,6 @@ async fn main() -> std::io::Result<()> {
                             _ => {
                                 println!("Request received from cluster {:?}", request);
                                 if let Ok(response_messages) = node.execute(&message_execution_type, request.clone()).await {
-                                    println!("{} response vec {:?}", node_id, response_messages);
 
                                     let _ = node.insert_log_message(request.clone()).await;
                                     let mut output_buffer: Vec<IoSlice> = Vec::with_capacity(100);
@@ -104,7 +103,7 @@ async fn main() -> std::io::Result<()> {
                                     
                                     writer.flush().await?;
                                     tokio::task::yield_now().await;
-                                    println!("Response posted to TCPStream");
+
                                 }
                             }
                         }
@@ -122,7 +121,7 @@ async fn main() -> std::io::Result<()> {
         }
     }
     
-    println!("Main done!");
+    println!("Node {} done!", node_id);
     Ok(())
     
 }

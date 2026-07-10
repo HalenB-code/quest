@@ -58,7 +58,7 @@ _File Reading & Display
 log -target cluster/nodes
 
 
-cargo run --bin cluster "C:\rust\projects\rust-bdc\config.toml" true
+cargo run --bin cluster_server "C:\rust\projects\rust-bdc\config.toml" true
 cargo run --bin node_client 127.0.0.1:80886 node-1 127.0.0.1:80888 C:\\rust\\projects\\rust-bdc
 
 // -- exe --cluster_address --node_name --bind_address --local_path 

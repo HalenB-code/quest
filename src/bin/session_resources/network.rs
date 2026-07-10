@@ -168,7 +168,7 @@ impl NetworkManager {
                                 self.network_request_writers.insert(node_id.clone(), network_request_sender);
                                 tokio::spawn(handle_node_connection(socket, network_request_receiver, network_response_sender, node_id.clone()));
 
-                                if let Err(error) = self.cluster_sending_channel.send(format!(r#"{{"src":"cluster-orchestrator","dest":"{node_id}","body":{{"type":"remote_connect"}}}}"#)).await {
+                                if let Err(error) = self.cluster_sending_channel.send(format!(r#"{{"src":"node-master","dest":"{node_id}","body":{{"type":"remote_connect"}}}}"#)).await {
                                     println!("Error sending remote connect init");
                                 }
 
@@ -266,7 +266,7 @@ pub async fn handle_node_connection(mut stream: TcpStream, mut recv_requests: mp
                 if let Some(message_target) = message.dest() {
 
                     if message_target == &node_id {
-                        println!("Writing request to node {}", node_id);
+
                         let serialized = serialize_tcp_response(message).await.unwrap();
                         if let Err(e) = stream.write(&serialized.as_bytes()).await {
                             println!("Failed to send message to {}: {:?}", node_id, e);
@@ -286,7 +286,7 @@ pub async fn handle_node_connection(mut stream: TcpStream, mut recv_requests: mp
                 match result {
                     Ok(bytes) if bytes > 0 => {
                         let received_data = buffer[..bytes].to_vec();
-                        println!("node handler bytes in {:?}", received_data);
+
                         buffer.resize(1024, 0);
                         
 
@@ -350,7 +350,6 @@ pub async fn parse_vector_bytes(bytes: &[u8]) -> Result<Vec<Message>, ClusterExc
 
     // Line end "\n" = 10
     for string in bytes.rsplit(|x| *x == 10) {
-        println!("String {:?}", string);
 
         match string.is_empty() {
             true => {

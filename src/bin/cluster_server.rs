@@ -1,5 +1,6 @@
 mod session_resources;
 use std::io;
+
 use crate::session_resources::implementation::{MessageExecutionType};
 use crate::session_resources::cluster::Cluster;
 use crate::session_resources::session::Session;
@@ -17,7 +18,7 @@ async fn main() {
   let message_execution_target = MessageExecutionType::StdOut;
   let (external_tx, external_rx) = mpsc::channel::<String>(100);
 
-  let mut cluster: Cluster = Cluster::create(1, external_tx.clone(), external_rx, message_execution_target, source_path, establish_network).await;
+  let mut cluster: Cluster = Cluster::create(1, external_tx.clone(), message_execution_target, source_path, establish_network).await;
 
   if establish_network {
       match cluster.network_manager.create_network().await {
@@ -42,15 +43,16 @@ async fn main() {
       }
   }
 
-  // TODO
-  // Establish network here
+  // Establish CLI sender and receiver channels
+  let (cli_tx, cli_rx) = mpsc::channel::<String>(100);
  
-  let mut session = Session::new(cluster, external_tx.clone());
+  let mut session = Session::new(cluster, cli_rx, external_rx);
   
   tokio::spawn(async move {
     session.session_execution().await;
   });
   
+
   // This loops accepts client requests
   loop {
     let mut std_input = String::new();
@@ -65,14 +67,17 @@ async fn main() {
             break;
           },
           _ => {
-            external_tx.send(request.to_string()).await;
+            cli_tx.send(request.to_string()).await.unwrap();
           }
         }
-      },
-      Err(error) => eprintln!("Error reading from STDIN {error}"),
+      }
+      Err(error) => {
+        println!("Error mapping request: {:?}", error);   
+      }
     }
-  }
 
-  println!("Main end!");
+    println!("Main end!");
+
+  }
 
 }

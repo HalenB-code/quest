@@ -5,6 +5,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use serde_json;
 
+use crate::session_resources::implementation::ImplementationMode;
 use crate::session_resources::message::{MessageFields, MessageType, MessageTypeFields, Message};
 use crate::session_resources::exceptions::ClusterExceptions;
 use crate::session_resources::write_ahead_log::{WalEntry, WriteAheadLog};
@@ -18,7 +19,6 @@ pub struct QueryPlan {
     pub cluster_context: ClusterContext,
     pub query_plan_id: usize,
     pub query_plan_steps: BTreeMap<usize, HashMap<usize, (String, QueryPlanTypes, Message, QueryPlanStatus)>>, // usize is step of query plan; usize is sub-step of query plan step; String = node_id, QueryPlanTypes, String = message string, QueryPlanType Status
-    pub query_plan_status: QueryPlanStatus,
 }
 
 #[derive(Debug, Clone)]
@@ -45,7 +45,6 @@ impl QueryPlan {
             cluster_context,
             query_plan_id: 0,
             query_plan_steps: BTreeMap::new(),
-            query_plan_status: QueryPlanStatus::Pending,
         }
 
     }
@@ -200,7 +199,7 @@ impl QueryPlan {
                 let separator: u8;
 
                 // TODO: Support other delimiters
-                separator = ",".to_string().as_bytes()[0];
+                separator = delimiter.to_string().as_bytes()[0];
 
                 let file_system_type = cluster_config.working_directory.file_system_type.clone();
                 let infered_file_schema = FileSystemManager::get_file_header(cluster_config.working_directory.local_path.clone(), separator)?;
@@ -289,6 +288,13 @@ impl QueryPlan {
         }
     }
 
+    pub fn get_all_query_steps(&mut self) -> Vec<usize> {
+        let mut all_steps: Vec<usize> = Vec::new();
+        for (step_id, _step) in self.query_plan_steps.iter() {
+            all_steps.push(*step_id);
+        }
+        all_steps
+    }
 }
 
 #[derive(Debug, Clone, Hash, Eq, PartialEq, Serialize, Deserialize)]

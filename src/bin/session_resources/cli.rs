@@ -88,7 +88,14 @@ pub enum ClusterCommand {
             default_value = ""
         */
         logging_target: String,
-    }
+    },
+    CmdExecute {
+        /*
+            long = "-execute",
+            help = ""
+            default_value = ""
+        */
+    },
 }
 
 
@@ -101,6 +108,7 @@ impl fmt::Display for ClusterCommand {
             ClusterCommand::CmdLogCluster { .. } => write!(f, "log-cluster"),
             ClusterCommand::CmdLogNode { .. } => write!(f, "log-node"),
             ClusterCommand::CmdMessageString { message } => write!(f, "message: {}", message),
+            ClusterCommand::CmdExecute { .. } => write!(f, "execute"),
         }
     }
 }
@@ -130,6 +138,8 @@ impl ClusterCommand {
             }),
             "log-node" => Ok(ClusterCommand::CmdLogNode {
                 logging_target: "stdout".to_string(),
+            }),
+            "execute" => Ok(ClusterCommand::CmdExecute { 
             }),
             _ if action.starts_with("message") => Ok(ClusterCommand::CmdMessageString {
                 message: action.to_string(),
@@ -217,6 +227,10 @@ impl ClusterCommand {
                     logging_target: remainig_args.get("-target").unwrap_or(&"".to_string()).to_string(),
                 };
 
+                Ok(mapped_action)
+            },
+            ClusterCommand::CmdExecute { .. } => {
+                let mapped_action = ClusterCommand::CmdExecute {};
                 Ok(mapped_action)
             },
         }
