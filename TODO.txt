@@ -48,7 +48,7 @@ _Send, Poll, List, and Committ Offsets
 _File Reading & Display
 -a display-df -df_name df_broadcast -all-nodes true
 
--a read-file -fp C:\rust\projects\rust-bdc\test_data.txt -delimiter |
+read-file -fp C:\rust\projects\rust-bdc\test_data.txt -delimiter |
 -a display-df -df_name df -all-nodes true
 
 -- Display Dfs

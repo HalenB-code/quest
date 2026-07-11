@@ -36,9 +36,13 @@ impl Session {
     }
   }
 
-  pub fn add_current_request_to_query_plan(&mut self, request: ClusterCommand) {
+  pub async fn add_current_request_to_query_plan(&mut self, request: ClusterCommand) -> Result<(), ClusterExceptions> {
     let transaction_manager = self.cluster.transaction_manager.as_mut().unwrap();
-    transaction_manager.query_plan.add_step(request);
+    
+    if let Err(error) = transaction_manager.query_plan.add_step(request).await {
+        return Err(ClusterExceptions::InvalidCommand { error_message: format!("Failed to add request to query plan: {:?}", error) });
+    }
+    Ok(())
   }
 
   pub fn get_executables(&mut self, execution_target: String) -> Vec<Message> {
@@ -120,7 +124,10 @@ impl Session {
 
                   println!("Mapped request: {:?}", mapped_request);
 
-                  self.add_current_request_to_query_plan(mapped_request.clone());
+                  if let Err(error) = self.add_current_request_to_query_plan(mapped_request.clone()).await {
+                      eprintln!("Error adding request to query plan: {:?}", error);
+                      continue;
+                  }
 
                   match is_eager_execution {
 
@@ -128,6 +135,7 @@ impl Session {
                     true => {
 
                       list_of_executables = self.get_executables("".to_string());
+                      println!("Executing request: {:?}", list_of_executables);
                       self.execute_executables(list_of_executables).await.unwrap_or_else(|error| {
                         println!("Error executing request: {:?}", error);
                       });

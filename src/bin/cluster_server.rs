@@ -89,6 +89,7 @@ async fn main() {
         // If next STDIN message is exit, break from loop and return from session
         match request {
           "exit" => {
+            println!("Exiting session");
             break;
           },
           _ => {
@@ -100,8 +101,6 @@ async fn main() {
         println!("Error mapping request: {:?}", error);   
       }
     }
-
-    println!("Main end!");
 
   }
 
