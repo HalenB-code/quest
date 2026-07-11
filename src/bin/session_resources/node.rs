@@ -12,6 +12,7 @@ use tokio::sync::Mutex;
 use std::io;
 use std::fs::File;
 use std::io::Write;
+use tokio::sync::mpsc;
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::Hasher;
@@ -25,9 +26,19 @@ use chrono::Timelike;
 // Node Class
 // Node is the execution unit of a cluster
 //
+#[derive(Debug, Clone)]
+pub struct NodeHandle {
+    pub node_id: String,
+    pub sender: mpsc::Sender<Message>,
+}
 
+impl NodeHandle {
+    pub fn new(node_id: String, sender: mpsc::Sender<Message>) -> Self {
+        Self { node_id, sender }
+    }
+}
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct Node {
     pub node_id: String,
     pub local_path: String,
@@ -38,6 +49,8 @@ pub struct Node {
     pub message_responses: Arc<Mutex<VecDeque<Message>>>,
     pub message_record: Arc<Mutex<HashMap<usize, Message>>>,
     pub datastore: HashMap<String, DataFrame>,
+    pub request_receiver: mpsc::Receiver<Message>,
+    pub event_sender: mpsc::Sender<Message>,
 }
 
 pub trait NodeDataStoreTrait {
@@ -93,7 +106,7 @@ pub enum NodeRoleType {
   
   impl Node {
     // Create new instance of Node if not already in existance; existance determined by entry in nodes collection as multiple nodes may be created
-    pub async fn create(client_request: &Message, local_file_path: &String) -> Self {
+    pub async fn create(client_request: &Message, local_file_path: &String, request_receiver: mpsc::Receiver<Message>, event_sender: mpsc::Sender<Message>) -> Self {
 
     let node_name = (*client_request.node_id().unwrap()).clone();
 
@@ -109,52 +122,34 @@ pub enum NodeRoleType {
         message_responses: Arc::new(Mutex::new(VecDeque::new())), 
         message_record: Arc::new(Mutex::new(HashMap::new())),
         datastore: HashMap::new(),
+        request_receiver,
+        event_sender,
       }
     }
 
 
-    pub async fn process_requests(&mut self, message_execution_type: MessageExecutionType, cluster: &Arc<Mutex<Cluster>>) -> Result<(), ClusterExceptions> {
+    pub async fn process_requests(&mut self, message_execution_type: MessageExecutionType) -> Result<(), ClusterExceptions> {
 
-        loop {
-    
-            if let Some(message) = cluster.lock().await.messenger.dequeue().await {
+        while let Some(message) = self.request_receiver.recv().await {
+            let resulting_messages = self
+                .execute(&message_execution_type, message)
+                .await?;
 
-                let messeage_execution = self.execute(&message_execution_type, message).await?;
-                let mut propagation_message_handles = Vec::new();
-
-                for message_response in messeage_execution {
-
-                    match message_response {
-                        // messeage_execution will return either single response or combination of response and follow-up requests
-                        // Only propogate follow-ups requests
-                        Message::Request { .. } => {
-
-                            let cluster_clone = Arc::clone(cluster);
-    
-                            // Spawn an async task for each propagation
-                            let handle = tokio::spawn(async move {
-                                if let Err(e) = cluster_clone.lock().await.propagate_message(message_response).await {
-                                    eprintln!("Propagation failed: {:?}", e);
-                                }
-                            });
-                            propagation_message_handles.push(handle);
-
-                        },
-                        _ => {
-                            continue;
+            for resulting_message in resulting_messages {
+                self.event_sender
+                    .send(resulting_message)
+                    .await
+                    .map_err(|error| {
+                        ClusterExceptions::InvalidCommand {
+                            error_message: format!(
+                                "Failed to return node message: {error}"
+                            ),
                         }
-                    };
-                }
-
-                if propagation_message_handles.len() > 0 {
-                    for handle in propagation_message_handles {
-                        if let Err(e) = handle.await {
-                            eprintln!("Propagation task failed: {:?}", e);
-                        }
-                    }
-                }
+                    })?;
             }
-        };
+        }
+
+        Ok(())
     
     }
 

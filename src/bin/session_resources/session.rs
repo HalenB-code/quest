@@ -1,11 +1,9 @@
 use tokio::sync::mpsc;
-use std::collections::{HashMap, BTreeMap};
 
 use crate::session_resources::cli::ClusterCommand;
 use crate::session_resources::implementation::ImplementationMode;
-use crate::session_resources::transactions::{QueryPlanStatus, QueryPlanTypes, Transaction};
 use crate::session_resources::message::{Message, message_serializer};
-use crate::session_resources::cluster::{self, Cluster};
+use crate::session_resources::cluster::{Cluster};
 use crate::session_resources::exceptions::ClusterExceptions;
 
 // Session Class
@@ -20,6 +18,7 @@ pub struct Session {
   pub cluster: Cluster,
   pub cli_request_receiver: mpsc::Receiver<String>,
   pub response_receiving_channel: mpsc::Receiver<String>,
+  pub node_event_receiver: mpsc::Receiver<Message>,
 }
 
 // Need to add eager/lazy execution at the session level to enable streaming and batching
@@ -27,12 +26,13 @@ pub struct Session {
 // should be implemented once received or as part of DAG
 impl Session {
   // Add create method to tie session to cluster
-  pub fn new(cluster: Cluster, cli_receiver: mpsc::Receiver<String>, cluster_response_receiver: mpsc::Receiver<String>) -> Session {
+  pub fn new(cluster: Cluster, cli_receiver: mpsc::Receiver<String>, cluster_response_receiver: mpsc::Receiver<String>, node_event_receiver: mpsc::Receiver<Message>) -> Session {
     return Self {
       session_id: "999".to_string(), 
       cluster, 
       cli_request_receiver: cli_receiver,
-      response_receiving_channel: cluster_response_receiver
+      response_receiving_channel: cluster_response_receiver,
+      node_event_receiver: node_event_receiver
     }
   }
 
@@ -153,7 +153,7 @@ impl Session {
                 Err(error) => {
                   println!("Error mapping request: {:?}", error);
                 }
-            }
+              }
             },
             cluster_message = self.response_receiving_channel.recv() => {
 
@@ -176,6 +176,42 @@ impl Session {
                         break;
                     }
                 }
+            },
+            node_event = self.node_event_receiver.recv() => {
+              match node_event {
+                Some(message) => {
+                    match message {
+                        Message::Request { .. }
+                        | Message::Init { .. } => {
+                            if let Err(error) = self
+                                .cluster
+                                .propagate_message(message)
+                                .await
+                            {
+                                eprintln!(
+                                    "Failed to propagate node message: {error}"
+                                );
+                            }
+                        }
+
+                        Message::Response { .. } => {
+                            if let Err(error) = self
+                                .cluster
+                                .messenger
+                                .response_queue(message)
+                                .await
+                            {
+                                eprintln!(
+                                    "Failed to queue node response: {error}"
+                                );
+                            }
+                        }
+                    }
+                }
+                None => {
+                    println!("Node event channel closed");
+                }
+              }
             }
         }
     }

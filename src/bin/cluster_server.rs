@@ -3,7 +3,11 @@ use std::io;
 
 use crate::session_resources::implementation::{MessageExecutionType};
 use crate::session_resources::cluster::Cluster;
+use crate::session_resources::network::NetworkManager;
 use crate::session_resources::session::Session;
+use crate::session_resources::message::Message;
+use crate::session_resources::config::ClusterConfig;
+use crate::session_resources::messenger::Messenger;
 
 use tokio::sync::mpsc;
 use std::env;
@@ -15,10 +19,20 @@ async fn main() {
   let source_path = args[1].clone();
   let establish_network = args[2].clone().parse::<bool>().unwrap();
 
+  let cluster_config = ClusterConfig::read_config(source_path);
+
   let message_execution_target = MessageExecutionType::StdOut;
   let (external_tx, external_rx) = mpsc::channel::<String>(100);
+  let (node_event_tx, node_event_rx) = mpsc::channel::<Message>(100);
 
-  let mut cluster: Cluster = Cluster::create(1, external_tx.clone(), message_execution_target, source_path, establish_network).await;
+  // Assemble network manager
+  let network_layout = &cluster_config.network;
+  let network_manager = NetworkManager::new(network_layout, external_tx.clone(), cluster_config.working_directory.local_path.clone(), establish_network);
+  let other_nodes = network_manager.network_map.clone().into_keys().collect::<Vec<String>>();
+
+  // Assemble messenger
+  let messenger = Messenger::create(external_tx);
+  let mut cluster: Cluster = Cluster::create(1, &cluster_config, network_manager, messenger, node_event_tx, message_execution_target, establish_network).await;
 
   if establish_network {
       match cluster.network_manager.create_network().await {
@@ -46,12 +60,23 @@ async fn main() {
   // Establish CLI sender and receiver channels
   let (cli_tx, cli_rx) = mpsc::channel::<String>(100);
  
-  let mut session = Session::new(cluster, cli_rx, external_rx);
+  let mut session = Session::new(cluster, cli_rx, external_rx, node_event_rx);
   
   tokio::spawn(async move {
     session.session_execution().await;
   });
   
+
+  // Startup node init commands
+{  
+  let node_init_message: &String = &format!(r#"-message {{"type":"init","msg_id":0,"node_id":"node-master","node_ids":{:?}}}"#, other_nodes);
+  cli_tx.send(node_init_message.to_string());
+
+  for node_id in other_nodes.clone() {
+    let node_init_message: &String = &format!(r#"-message {{"type":"init","msg_id":0,"node_id":"{node_id}","node_ids":{:?}}}"#, other_nodes);
+    cli_tx.send(node_init_message.to_string());
+  }
+}
 
   // This loops accepts client requests
   loop {

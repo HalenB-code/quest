@@ -1,8 +1,7 @@
 use crate::session_resources::message::{Message, MessageFields, MessageStatus, MessageType, MsgKind};
 use std::collections::{HashMap, BTreeMap};
-use crate::session_resources::node::Node;
+use crate::session_resources::node::{Node, NodeHandle};
 use crate::session_resources::implementation::MessageExecutionType;
-use crate::session_resources::transactions::{QueryPlanTypes, QueryPlanStatus};
 use crate::session_resources::messenger::Messenger;
 use crate::session_resources::exceptions::ClusterExceptions;
 use crate::session_resources::config::ClusterConfig;
@@ -11,15 +10,12 @@ use crate::session_resources::file_system::FileSystemManager;
 use crate::session_resources::network::{NetworkManager, NodeType};
 use crate::session_resources::message;
 use crate::session_resources::implementation::StdOut;
-use crate::session_resources::cli::ClusterCommand;
 use crate::session_resources::message::{message_serializer, message_deserializer};
 use crate::session_resources::write_ahead_log::{WriteAheadLog, WalEntry};
 use crate::session_resources::transactions::Transaction;
 use crate::session_resources::transactions::Action;
-use crate::session_resources::implementation::ImplementationMode;
 
-use std::sync::Arc;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc};
 use std::fmt::Debug;
 use std::fs::File;
 use std::io::Write;
@@ -38,7 +34,9 @@ pub struct Cluster {
     pub cluster_id: String,
     pub execution_target: MessageExecutionType,
     pub messenger: Messenger,
-    pub nodes: BTreeMap<String, Node>,
+    pub nodes: BTreeMap<String, NodeHandle>,
+    pub node_event_sender: mpsc::Sender<Message>,
+    pub node_request_senders:HashMap<String, mpsc::Sender<Message>>,
     pub transaction_manager: Option<TransactionManager>,
     pub cluster_configuration: ClusterConfig,
     pub file_system_manager: FileSystemManager,
@@ -47,45 +45,56 @@ pub struct Cluster {
 }
 
 impl Cluster {
-  pub async fn create(cluster_reference: usize, outgoing_message_handler: mpsc::Sender<String>, execution_target: MessageExecutionType, source_path: String, establish_network: bool) -> Self {
+  pub async fn create(cluster_reference: usize, cluster_config: &ClusterConfig, network_manager: NetworkManager, messenger: Messenger, node_event_sender: mpsc::Sender<Message>, execution_target: MessageExecutionType, establish_network: bool) -> Self {
 
-    let cluster_config = ClusterConfig::read_config(source_path);
     let wal_path = &cluster_config.working_directory.wal_path;
     let file_system_accessibility = &cluster_config.working_directory.file_system_type;
-    let network_layout = &cluster_config.network;
+    // let network_layout = &cluster_config.network;
 
-    let network_manager = NetworkManager::new(network_layout, outgoing_message_handler.clone(), cluster_config.working_directory.local_path.clone(), establish_network);
+    // let network_manager = NetworkManager::new(network_layout, outgoing_message_handler.clone(), cluster_config.working_directory.local_path.clone(), establish_network);
 
-    let mut nodes = BTreeMap::new();
-    let other_nodes = network_manager.network_map.clone().into_keys().collect::<Vec<String>>();
-    let network_map = network_manager.network_map.clone();
+    // let mut nodes = BTreeMap::new();
+    // let other_nodes = network_manager.network_map.clone().into_keys().collect::<Vec<String>>();
+    // let network_map = network_manager.network_map.clone();
+    // let mut node_request_senders = HashMap::new();
 
-    // Insert cluster-orchestrator node into the cluster
-    let init_request = message::message_deserializer(&format!(r#"{{"type":"init","msg_id":0,"node_id":"node-master","node_ids":{:?}}}"#, other_nodes)).expect("Expecting correct init request structure");
-    let virtual_remote_node = Node::create(&init_request, &cluster_config.working_directory.local_path.clone()).await;
-    nodes.insert("node-master".to_string(), virtual_remote_node);
+    // // Create a channel for sending requests to nodes and receiving responses from nodes
+    // let (request_tx, request_rx) = mpsc::channel::<Message>(100);
 
-    if establish_network {
+    // // Insert cluster-orchestrator node into the cluster
+    // let init_request = message::message_deserializer(&format!(r#"{{"type":"init","msg_id":0,"node_id":"node-master","node_ids":{:?}}}"#, other_nodes)).expect("Expecting correct init request structure");
+    // let virtual_remote_node = Node::create(&init_request, &cluster_config.working_directory.local_path.clone(), request_rx, node_event_sender.clone(),).await;
+    // let virtual_remote_node_handle = NodeHandle::new("node-master".to_string(), request_tx.clone());
+    // node_request_senders.insert("node-master".to_string(), request_tx);
+    // nodes.insert("node-master".to_string(), virtual_remote_node_handle);
 
-      for (node_id, (node_port, node_type)) in network_map {
-        match node_type {
-          NodeType::Local => {
-          },
-          NodeType::Remote => {
-            let init_request = message::message_deserializer(&format!(r#"{{"type":"init","msg_id":0,"node_id":"{node_id}","node_ids":{:?}}}"#, other_nodes)).expect("Expecting correct init request structure");
-            let virtual_remote_node = Node::create(&init_request, &cluster_config.working_directory.local_path.clone()).await;
-            nodes.insert(node_id.to_string(), virtual_remote_node);
-          }
-        }
-      }
+    // if establish_network {
+
+    //   for (node_id, (node_port, node_type)) in network_map {
+    //     match node_type {
+    //       NodeType::Local => {
+    //       },
+    //       NodeType::Remote => {
+    //         // Create a channel for sending requests to nodes and receiving responses from nodes
+    //         let (request_tx, request_rx) = mpsc::channel::<Message>(100);
+    //         let init_request = message::message_deserializer(&format!(r#"{{"type":"init","msg_id":0,"node_id":"{node_id}","node_ids":{:?}}}"#, other_nodes)).expect("Expecting correct init request structure");
+    //         let virtual_remote_node = Node::create(&init_request, &cluster_config.working_directory.local_path.clone(), request_rx, node_event_sender.clone(),).await;
+    //         let virtual_remote_node_handle = NodeHandle::new(node_id.clone(), request_tx.clone());
+    //         node_request_senders.insert(node_id.clone(), request_tx.clone());
+    //         nodes.insert(node_id.to_string(), virtual_remote_node_handle);
+    //       }
+    //     }
+    //   }
       
-    }
+    // }
 
     let mut cluster: Cluster = Cluster {
       cluster_id: format!("cluster-{cluster_reference}"), 
       execution_target,
-      messenger: Messenger::create(outgoing_message_handler), 
-      nodes,
+      messenger,
+      nodes: BTreeMap::new(),
+      node_event_sender: node_event_sender,
+      node_request_senders: HashMap::new(),
       transaction_manager: None,
       cluster_configuration: cluster_config.clone(),
       file_system_manager: FileSystemManager::new(file_system_accessibility),
@@ -112,7 +121,7 @@ impl Cluster {
             None => return,
         };
 
-        let mut messenger = self.messenger.clone();
+        let messenger = self.messenger.clone();
 
         tokio::spawn(async move {
             let mut lock = reader.lock().await;
@@ -133,64 +142,65 @@ impl Cluster {
     }
 
 
-  pub async fn process_initialization(&mut self, init_request_message: Message) -> Result<(), ClusterExceptions> {
+    pub async fn process_initialization(&mut self, init_request_message: Message) -> Result<(), ClusterExceptions> {
 
-    let node_exists = self.nodes.contains_key(init_request_message.node_id().unwrap());
+        let node_exists = self.nodes.contains_key(init_request_message.node_id().unwrap());
 
-    match node_exists {
-        false => {
-            let mut node = Node::create(&init_request_message, &self.cluster_configuration.working_directory.local_path).await;
-            let node_id = node.node_id.clone();
-            self.network_manager.network_map.insert(node_id.clone(), ("".to_string(), NodeType::Local));
+        match node_exists {
+            false => {
+                let (request_tx, request_rx) = mpsc::channel::<Message>(100);
+                let mut node = Node::create(&init_request_message, &self.cluster_configuration.working_directory.local_path, request_rx, self.node_event_sender.clone()).await;
+                let node_handle = NodeHandle::new(node.node_id.clone(), request_tx.clone());
+                let node_id = node.node_id.clone();
+                self.network_manager.network_map.insert(node_id.clone(), ("".to_string(), NodeType::Local));
 
-            // Store the new node in the cluster
-            self.nodes
-                .entry(node_id.clone())
-                .or_insert(node.clone());
+                // Store the new node in the cluster
+                self.nodes
+                    .entry(node_id.clone())
+                    .or_insert(node_handle);
 
-            let node_check = self.nodes.contains_key(init_request_message.node_id().unwrap());
-            
-            if node_check {
-                println!("Node {} has been connected to {}", &node_id, self.cluster_id);
+                self.node_request_senders.insert(node_id.clone(), request_tx);
 
-                let cluster_arc = Arc::new(Mutex::new(self.clone()));
-                let message_execution_target = self.execution_target.clone();
+                let node_check = self.nodes.contains_key(init_request_message.node_id().unwrap());
+                
+                if node_check {
+                    println!("Node {} has been connected to {}", &node_id, self.cluster_id);
+                    let message_execution_target = self.execution_target.clone();
 
-                tokio::spawn(async move {
-                  let cluster_clone = Arc::clone(&cluster_arc);
-                    if let Err(err) = node
-                        .process_requests(message_execution_target, &cluster_clone)
-                        .await
-                    {
-                        eprintln!(
-                            "Error processing requests for node {}: {:?}",
-                            node_id, err
-                        );
-                    }
-                });
-            } else {
-                return Err(ClusterExceptions::FailedToRetrieveNodeFromCluster {
-                    error_message: node_id,
-                });
+                    tokio::spawn(async move {
+                        if let Err(err) = node
+                            .process_requests(message_execution_target)
+                            .await
+                        {
+                            eprintln!(
+                                "Error processing requests for node {}: {:?}",
+                                node_id, err
+                            );
+                        }
+                    });
+                } else {
+                    return Err(ClusterExceptions::FailedToRetrieveNodeFromCluster {
+                        error_message: node_id,
+                    });
+                }
+            }
+            true => {
+                if let Some((_key, _value)) = self.nodes.get_key_value(init_request_message.node_id().unwrap()) {
+                    println!(
+                        "Node {} already exists and is connected to {}",
+                        init_request_message.node_id().unwrap(),
+                        self.cluster_id
+                    );
+                } else {
+                    return Err(ClusterExceptions::FailedToRetrieveNodeFromCluster {
+                        error_message: init_request_message.node_id().unwrap().to_string(),
+                    });
+                }
             }
         }
-        true => {
-            if let Some((_key, _value)) = self.nodes.get_key_value(init_request_message.node_id().unwrap()) {
-                println!(
-                    "Node {} already exists and is connected to {}",
-                    init_request_message.node_id().unwrap(),
-                    self.cluster_id
-                );
-            } else {
-                return Err(ClusterExceptions::FailedToRetrieveNodeFromCluster {
-                    error_message: init_request_message.node_id().unwrap().to_string(),
-                });
-            }
-        }
+
+    Ok(())
     }
-
-  Ok(())
-  }
 
 //   pub async fn run(&mut self) -> Result<(), ClusterExceptions> {
     
@@ -210,154 +220,154 @@ impl Cluster {
 //     Ok(())
 //   }
 
-  pub fn remove(mut self, node: Node) -> Result<(), ClusterExceptions> {
+    pub fn remove(mut self, node: Node) -> Result<(), ClusterExceptions> {
 
-  let node_removal = self.nodes.remove(&node.node_id);
+    let node_removal = self.nodes.remove(&node.node_id);
 
-  match node_removal {
-    Some(_node_removal) => {
-      println!("{} has been disconnected from {}", node.node_id, self.cluster_id);
-    },
-    None => {
-      return Err(ClusterExceptions::FailedToRemoveNodeFromCluster { error_message: node.node_id } );
-    }
-  }
-  Ok(())
-  }
-
-  pub fn terminate(mut self) -> Result<(), ClusterExceptions> {
-  let node_count = self.nodes.is_empty();
-
-  match node_count {
-    true => Err(ClusterExceptions::ClusterDoesNotHaveAnyNodes { error_message: self.cluster_id } ),
-    false => {
-      for key in &self.get_nodes() {
-        println!("Removing {} from {}", key, self.cluster_id);
-        self.nodes.remove(&key.clone());
-      }
-      println!("All nodes removed from {:?}", self.cluster_id);
-      drop(self);
-      Ok(())
-    }
-  }
-  }
-
-  pub fn get_nodes(&self) -> Vec<String> {
-    self.nodes.keys().cloned().collect()
-  }
-
-  pub fn count_nodes(&self) -> usize {
-  self.nodes.len()
-  }
-
-  pub fn get_node_metadata(&self, node: String) -> Result<&Node, ClusterExceptions> {
-
-  if let Some(node) = self.nodes.get(&node) {
-    Ok(node)
-  }
-  else {
-    Err(ClusterExceptions::NodeDoesNotExist { error_message: node.clone() })
-  }
-
-  }
-
-  pub fn map_request(&mut self, request: String) -> Result<String, ClusterExceptions> {
-
-    let args: Vec<String> = request.split(" ").map(|element| element.to_string()).collect();
-    // println!("{:?}", args);
-    let mut action = None;
-    let mut file_path = None;
-    let mut df_name = None;
-    let mut delimiter: Option<String> = None;
-    let mut target_node: Option<String> = None;
-    let mut all_nodes: bool = false;
-
-    let mut iter = args.iter().peekable();
-    while let Some(arg) = iter.next() {
-        match arg.as_str() {
-            "-a" => action = iter.next().map(|s| s.clone()),
-            "-fp" => file_path = iter.next().map(|s| s.clone()),
-            "-df_name" => df_name = iter.next().map(|s| s.clone()),
-            "-delimiter" => delimiter = iter.next().map(|s| s.clone()),
-            "-target-node" => target_node = iter.next().map(|s| s.clone()),
-            "-all-nodes" => all_nodes = true,
-            _ => {}
+    match node_removal {
+        Some(_node_removal) => {
+        println!("{} has been disconnected from {}", node.node_id, self.cluster_id);
+        },
+        None => {
+        return Err(ClusterExceptions::FailedToRemoveNodeFromCluster { error_message: node.node_id } );
         }
     }
+    Ok(())
+    }
 
-    if let Some(parsed_action) = action.clone() {
-      match parsed_action.as_str() {
-        "read-file" => {
-          // TODO
-          // Need to accept df name when read request received
-          if let Some(fp) = file_path {
-            let request_string = self.read_data_from_file(fp.to_string(), delimiter)?;
-            return Ok(request_string);
-          } else {
-            return Err(ClusterExceptions::NodeDoesNotExist { error_message: request });
-          }
-        },
-        "display-df" => {
-          if let Some(df_name) = df_name {
-            let request_string = self.display_df(df_name.to_string(), target_node, all_nodes)?;
-            return Ok(request_string);
-          } else {
-            return Err(ClusterExceptions::NodeDoesNotExist { error_message: request });
-          }
-        },
-        "group-by" => {
-          if let Some(df_name) = df_name {
-            let request_string = self.display_df(df_name.to_string(), target_node, all_nodes)?;
-            return Ok(request_string);
-          } else {
-            return Err(ClusterExceptions::NodeDoesNotExist { error_message: request });
-          }
-        },
-        "log-cluster" => {
-          // TODO
-          // Need to accept log level when log request received
-          return Ok("log-cluster".to_string());
-        },
-        "log-node" => {
-          // TODO
-          // Need to accept log level when log request received
-          return Ok("log-node".to_string());
-        },
-        _ => {
-            return Ok(request);
+    pub fn terminate(mut self) -> Result<(), ClusterExceptions> {
+    let node_count = self.nodes.is_empty();
+
+    match node_count {
+        true => Err(ClusterExceptions::ClusterDoesNotHaveAnyNodes { error_message: self.cluster_id } ),
+        false => {
+        for key in &self.get_nodes() {
+            println!("Removing {} from {}", key, self.cluster_id);
+            self.nodes.remove(&key.clone());
         }
-      }
-    } else {
-    return Ok(request);
+        println!("All nodes removed from {:?}", self.cluster_id);
+        drop(self);
+        Ok(())
+        }
+    }
     }
 
-
-  }
-
-  pub fn log_messages(&self) -> std::io::Result<()> {
-
-      let file_path = format!("{}\\cluster_{}_log.txt", self.cluster_configuration.working_directory.local_path, self.cluster_id);
-
-      let mut out_file = File::create(file_path)?;
-
-      for (id, (message, status)) in self.node_message_log.iter() {
-        out_file.write(format!("{} {:?} {}\n", id, message, status).as_bytes())?;
-      }
-
-      Ok(())
+    pub fn get_nodes(&self) -> Vec<String> {
+        self.nodes.keys().cloned().collect()
     }
 
-  pub fn cluster_response(&self, message_response: Message) -> Result<(), ClusterExceptions> {
-    
-    if let MessageExecutionType::StdOut = self.execution_target {
-      let serialized_response = message::message_serializer(&message_response)?;
-      let stdout_lock = io::stdout().lock();
-      StdOut::write_to_std_out(stdout_lock, format!("Response {}", serialized_response))?;
-      return Ok(());
-    } else {
-      return Err(ClusterExceptions::InvalidClusterRequest { error_message_1: message_response, error_message_2: "StdOut".to_string() });
+    pub fn count_nodes(&self) -> usize {
+    self.nodes.len()
     }
-  }
+
+    pub fn get_node_metadata(&self, node: String) -> Result<&NodeHandle, ClusterExceptions> {
+
+    if let Some(node) = self.nodes.get(&node) {
+        Ok(node)
+    }
+    else {
+        Err(ClusterExceptions::NodeDoesNotExist { error_message: node.clone() })
+    }
+
+    }
+
+    pub fn map_request(&mut self, request: String) -> Result<String, ClusterExceptions> {
+
+        let args: Vec<String> = request.split(" ").map(|element| element.to_string()).collect();
+        // println!("{:?}", args);
+        let mut action = None;
+        let mut file_path = None;
+        let mut df_name = None;
+        let mut delimiter: Option<String> = None;
+        let mut target_node: Option<String> = None;
+        let mut all_nodes: bool = false;
+
+        let mut iter = args.iter().peekable();
+        while let Some(arg) = iter.next() {
+            match arg.as_str() {
+                "-a" => action = iter.next().map(|s| s.clone()),
+                "-fp" => file_path = iter.next().map(|s| s.clone()),
+                "-df_name" => df_name = iter.next().map(|s| s.clone()),
+                "-delimiter" => delimiter = iter.next().map(|s| s.clone()),
+                "-target-node" => target_node = iter.next().map(|s| s.clone()),
+                "-all-nodes" => all_nodes = true,
+                _ => {}
+            }
+        }
+
+        if let Some(parsed_action) = action.clone() {
+        match parsed_action.as_str() {
+            "read-file" => {
+            // TODO
+            // Need to accept df name when read request received
+            if let Some(fp) = file_path {
+                let request_string = self.read_data_from_file(fp.to_string(), delimiter)?;
+                return Ok(request_string);
+            } else {
+                return Err(ClusterExceptions::NodeDoesNotExist { error_message: request });
+            }
+            },
+            "display-df" => {
+            if let Some(df_name) = df_name {
+                let request_string = self.display_df(df_name.to_string(), target_node, all_nodes)?;
+                return Ok(request_string);
+            } else {
+                return Err(ClusterExceptions::NodeDoesNotExist { error_message: request });
+            }
+            },
+            "group-by" => {
+            if let Some(df_name) = df_name {
+                let request_string = self.display_df(df_name.to_string(), target_node, all_nodes)?;
+                return Ok(request_string);
+            } else {
+                return Err(ClusterExceptions::NodeDoesNotExist { error_message: request });
+            }
+            },
+            "log-cluster" => {
+            // TODO
+            // Need to accept log level when log request received
+            return Ok("log-cluster".to_string());
+            },
+            "log-node" => {
+            // TODO
+            // Need to accept log level when log request received
+            return Ok("log-node".to_string());
+            },
+            _ => {
+                return Ok(request);
+            }
+        }
+        } else {
+        return Ok(request);
+        }
+
+
+    }
+
+    pub fn log_messages(&self) -> std::io::Result<()> {
+
+        let file_path = format!("{}\\cluster_{}_log.txt", self.cluster_configuration.working_directory.local_path, self.cluster_id);
+
+        let mut out_file = File::create(file_path)?;
+
+        for (id, (message, status)) in self.node_message_log.iter() {
+            out_file.write(format!("{} {:?} {}\n", id, message, status).as_bytes())?;
+        }
+
+        Ok(())
+        }
+
+    pub fn cluster_response(&self, message_response: Message) -> Result<(), ClusterExceptions> {
+        
+        if let MessageExecutionType::StdOut = self.execution_target {
+        let serialized_response = message::message_serializer(&message_response)?;
+        let stdout_lock = io::stdout().lock();
+        StdOut::write_to_std_out(stdout_lock, format!("Response {}", serialized_response))?;
+        return Ok(());
+        } else {
+        return Err(ClusterExceptions::InvalidClusterRequest { error_message_1: message_response, error_message_2: "StdOut".to_string() });
+        }
+    }
 
     pub async fn insert_message_log(&mut self, message: Message) -> Result<usize, ClusterExceptions> {
 
@@ -414,7 +424,7 @@ impl Cluster {
         let message_id = self.insert_message_log(mapped_message.clone()).await?;
 
         if OVERWRITE_INCOMING_MSG_ID {
-              mapped_message.set_msg_id(message_id);
+                mapped_message.set_msg_id(message_id);
         }
 
         match mapped_message.kind() {
@@ -487,8 +497,6 @@ impl Cluster {
         }
     }
         
-
-    
     pub async fn process_local(&mut self, message_id: usize, message_request: Message) -> Result<(), ClusterExceptions> {
 
         match message_request {
@@ -503,26 +511,54 @@ impl Cluster {
                 };
             },
             Message::Request { .. } => {
-                match message_request.msg_type().unwrap().as_str() {
+                let message_type = message_request
+                    .msg_type()
+                    .ok_or_else(|| {
+                        ClusterExceptions::InvalidCommand {
+                            error_message:
+                                "Request missing message type"
+                                    .to_string(),
+                        }
+                    })?
+                    .to_string();
+
+                match message_type.as_str() {
                     "txn" => {
-                    if let Err(error) = self.categorize_and_queue_transactions(message_request).await {
-                        self.update_message_log(message_id, MessageStatus::Failed).await?;
-                        return Err(error);
-                    } else {
-                        self.update_message_log(message_id, MessageStatus::Ok).await?;
-                        return Ok(());
-                    };
-                    },
-                    _ => {
-                    if let Err(error) = self.messenger.request_queue(message_request).await {
-                        self.update_message_log(message_id, MessageStatus::Failed).await?;
-                        return Err(error);
-                    } else {
-                        self.update_message_log(message_id, MessageStatus::Ok).await?;
-                        return Ok(());
-                    };
+                        match self
+                            .categorize_and_queue_transactions(
+                                message_request,
+                            )
+                            .await
+                        {
+                            Ok(()) => {
+                                self.update_message_log(
+                                    message_id,
+                                    MessageStatus::Ok,
+                                )
+                                .await?;
+
+                                Ok(())
+                            }
+
+                            Err(error) => {
+                                self.update_message_log(
+                                    message_id,
+                                    MessageStatus::Failed,
+                                )
+                                .await?;
+
+                                Err(error)
+                            }
+                        }
                     }
 
+                    _ => {
+                        self.send_request_to_node(
+                            message_id,
+                            message_request,
+                        )
+                        .await
+                    }
                 }
             },
             Message::Response { .. } => {
@@ -606,63 +642,62 @@ impl Cluster {
 
     pub async fn _process_remote(&mut self, message_id: usize, message_request: Message) -> Result<(), ClusterExceptions> {
 
-    let message_request_clone = message_request.clone();
-    let message_type = message_request_clone.msg_type().unwrap();
+        let message_request_clone = message_request.clone();
+        let message_type = message_request_clone.msg_type().unwrap();
 
-    // TODO: Add TX loop to handle transaction type
-    // Loop should call complete transaction fn below
-    match message_type.as_str() {
-        "txn" => {
-        self.complete_transaction_remote(message_id, message_request).await?;
-        return Ok(());
-        },
-        _ => {
-        
-        let node_id = message_request_clone.dest().unwrap();
+        // TODO: Add TX loop to handle transaction type
+        // Loop should call complete transaction fn below
+        match message_type.as_str() {
+            "txn" => {
+            self.complete_transaction_remote(message_id, message_request).await?;
+            return Ok(());
+            },
+            _ => {
+            
+            let node_id = message_request_clone.dest().unwrap();
 
-        if let Some(remote_sending_channel) = &self.network_manager.network_request_writers.get(node_id) {
+            if let Some(remote_sending_channel) = &self.network_manager.network_request_writers.get(node_id) {
 
-                match remote_sending_channel.send(message_request.clone()).await {
-                Ok(()) => {
-                println!("Message sent to {}", node_id);
-                match self.poll_remote_responses(node_id).await {
-                    Ok(message_responses) => {
-                    println!("poll remote returned");
+                    match remote_sending_channel.send(message_request.clone()).await {
+                    Ok(()) => {
+                    println!("Message sent to {}", node_id);
+                    match self.poll_remote_responses(node_id).await {
+                        Ok(message_responses) => {
+                        println!("poll remote returned");
 
-                    for message_response in message_responses {
-                        match message_response.body().unwrap().is_ok() {
-                        true => {
-                            self.update_message_log(message_id, MessageStatus::Ok).await?;
-                        },
-                        false => {
-                            // If one of the responses from the remote node is a follow-up request, add this to the response queue
-                            //self.messenger.response_queue(message_response).await?;
-                            self.update_message_log(message_id, MessageStatus::Failed).await?;
+                        for message_response in message_responses {
+                            match message_response.body().unwrap().is_ok() {
+                            true => {
+                                self.update_message_log(message_id, MessageStatus::Ok).await?;
+                            },
+                            false => {
+                                // If one of the responses from the remote node is a follow-up request, add this to the response queue
+                                //self.messenger.response_queue(message_response).await?;
+                                self.update_message_log(message_id, MessageStatus::Failed).await?;
+                            }
+                            };
                         }
-                        };
-                    }
-                    return Ok(());
+                        return Ok(());
+                        },
+                        Err(error) => {
+                        println!("Send failed");
+                        return Err(ClusterExceptions::RemoteNodeRequestError { error_message: error.to_string() });
+                        }
+                    };
                     },
                     Err(error) => {
-                    println!("Send failed");
+                    println!("Remote request sent and err");
                     return Err(ClusterExceptions::RemoteNodeRequestError { error_message: error.to_string() });
                     }
-                };
-                },
-                Err(error) => {
-                println!("Remote request sent and err");
-                return Err(ClusterExceptions::RemoteNodeRequestError { error_message: error.to_string() });
+                } 
+                } else {
+                println!("No sending channel found for node {}", node_id);
+                    return Err(ClusterExceptions::RemoteNodeRequestError { error_message: "no sending channel".to_string() });
                 }
-            } 
-            } else {
-            println!("No sending channel found for node {}", node_id);
-                return Err(ClusterExceptions::RemoteNodeRequestError { error_message: "no sending channel".to_string() });
             }
-        }
-    };
+        };
 
     }
-
 
     pub async fn complete_transaction_remote(&mut self, message_id: usize, message_request: Message) -> Result<(), ClusterExceptions> {
 
@@ -671,8 +706,8 @@ impl Cluster {
         let transaction_actions: Vec<Action>;
 
         if let Some(transaction_manager) = &mut self.transaction_manager {
-          transaction_id = transaction_manager.start_transaction(message_request.clone(), node_topology).await?;
-          transaction_actions = transaction_manager.execute_transaction(message_request.dest().unwrap().clone(), transaction_id).await?;
+            transaction_id = transaction_manager.start_transaction(message_request.clone(), node_topology).await?;
+            transaction_actions = transaction_manager.execute_transaction(message_request.dest().unwrap().clone(), transaction_id).await?;
         } else {
             return Err(ClusterExceptions::TransactionError(TransactionExceptions::TransactionManagerNotInitialized { error_message: "Transaction manager not initialized".to_string() }));
         }
@@ -680,63 +715,63 @@ impl Cluster {
 
         for action in transaction_actions {
 
-          if let Some(transaction_message_request) = action.value {
+            if let Some(transaction_message_request) = action.value {
 
-              let node_id = transaction_message_request.dest().unwrap();
+                let node_id = transaction_message_request.dest().unwrap();
 
-              if let Some(remote_sending_channel) = &self.network_manager.network_request_writers.get(node_id) {
+                if let Some(remote_sending_channel) = &self.network_manager.network_request_writers.get(node_id) {
 
-              match remote_sending_channel.send(transaction_message_request.clone()).await {
-                  Ok(()) => {
+                match remote_sending_channel.send(transaction_message_request.clone()).await {
+                    Ok(()) => {
 
-                  match self.poll_remote_responses(node_id).await {
-                      Ok(message_responses) => {
+                    match self.poll_remote_responses(node_id).await {
+                        Ok(message_responses) => {
 
-                      for message_response in message_responses {
-                          match message_response.body().unwrap().is_ok() {
-                          true => {
-                              ()
-                          },
-                          false => {
-                              // If one of the responses from the remote node is a follow-up request, add this to the response queue
-                              transaction_execution_error = Some(());
-                          }
-                          };
-                      }
-                      },
-                      Err(_error) => {
-                      transaction_execution_error = Some(());
-                      }
-                  };
-                  },
-                  Err(_error) => {
-                  transaction_execution_error = Some(());
-                  }
-              } 
+                        for message_response in message_responses {
+                            match message_response.body().unwrap().is_ok() {
+                            true => {
+                                ()
+                            },
+                            false => {
+                                // If one of the responses from the remote node is a follow-up request, add this to the response queue
+                                transaction_execution_error = Some(());
+                            }
+                            };
+                        }
+                        },
+                        Err(_error) => {
+                        transaction_execution_error = Some(());
+                        }
+                    };
+                    },
+                    Err(_error) => {
+                    transaction_execution_error = Some(());
+                    }
+                } 
             } else {
                 transaction_execution_error = Some(());
             }
-          } else {
-              transaction_execution_error = Some(());
-          }
+            } else {
+                transaction_execution_error = Some(());
+            }
         };
 
         if let Some(transaction_manager) = &mut self.transaction_manager {
 
-          if let None = transaction_execution_error {
-              transaction_manager.commit_transaction(transaction_id).await?;
-              self.update_message_log(message_id, MessageStatus::Ok).await?;
-              return Ok(())
-          } else {
-              self.update_message_log(message_id, MessageStatus::Failed).await?;
-              return Err(ClusterExceptions::TransactionError(TransactionExceptions::FailedToCommitTransaction { error_message: transaction_id.to_string() }));
-          }
+            if let None = transaction_execution_error {
+                transaction_manager.commit_transaction(transaction_id).await?;
+                self.update_message_log(message_id, MessageStatus::Ok).await?;
+                return Ok(())
+            } else {
+                self.update_message_log(message_id, MessageStatus::Failed).await?;
+                return Err(ClusterExceptions::TransactionError(TransactionExceptions::FailedToCommitTransaction { error_message: transaction_id.to_string() }));
+            }
 
         } else {
             return Err(ClusterExceptions::TransactionError(TransactionExceptions::TransactionManagerNotInitialized { error_message: "Transaction manager not initialized".to_string() }));
         }
 
-  }
+    }
 
     pub async fn complete_transaction(&mut self, message_request: Message) -> Result<(), ClusterExceptions> {
 
@@ -744,27 +779,27 @@ impl Cluster {
 
         if let Some(transaction_manager) = &mut self.transaction_manager {
 
-          let transaction_id = transaction_manager.start_transaction(message_request.clone(), node_topology).await?;
-          let transaction_actions = transaction_manager.execute_transaction(message_request.dest().unwrap().clone(), transaction_id).await?;
+            let transaction_id = transaction_manager.start_transaction(message_request.clone(), node_topology).await?;
+            let transaction_actions = transaction_manager.execute_transaction(message_request.dest().unwrap().clone(), transaction_id).await?;
 
-          let mut transaction_execution_error = None;
+            let mut transaction_execution_error = None;
 
-          for action in transaction_actions {
+            for action in transaction_actions {
 
-              if let Some(transaction_message_request) = action.value {
-              if let Err(_error) = self.messenger.request_queue(transaction_message_request).await {
-                  transaction_execution_error = Some(())
-              }
-              }
+                if let Some(transaction_message_request) = action.value {
+                if let Err(_error) = self.messenger.request_queue(transaction_message_request).await {
+                    transaction_execution_error = Some(())
+                }
+                }
 
-          };
+            };
 
-          if let None = transaction_execution_error {
-              transaction_manager.commit_transaction(transaction_id).await?;
-              Ok(())
-          } else {
-              return Err(ClusterExceptions::TransactionError(TransactionExceptions::FailedToCommitTransaction { error_message: transaction_id.to_string() }));
-          }
+            if let None = transaction_execution_error {
+                transaction_manager.commit_transaction(transaction_id).await?;
+                Ok(())
+            } else {
+                return Err(ClusterExceptions::TransactionError(TransactionExceptions::FailedToCommitTransaction { error_message: transaction_id.to_string() }));
+            }
 
         } else {
             return Err(ClusterExceptions::TransactionError(TransactionExceptions::TransactionManagerNotInitialized { error_message: "Transaction manager not initialized".to_string() }));
@@ -859,67 +894,67 @@ impl Cluster {
         }
     }
 
-  pub fn read_data_from_file(&mut self, file_path: String, delimiter: Option<String>) -> Result<String, ClusterExceptions> {
+    pub fn read_data_from_file(&mut self, file_path: String, delimiter: Option<String>) -> Result<String, ClusterExceptions> {
 
-    // Receive read request message
-    // File path retrieved from request
-    // Nodes are retrieved from cluster
-    // File path is added to file manager record
-    // Byte ordinals are generated for file based on nodes
-    // Transaction message is created that has a read request for each node with ordinal positions
-    // Depending on the FileSystemType, read is either receive bytes from home client and write to local file
-    // or, read existing file on distributed file share
-    // Read transaction completed or failed
+        // Receive read request message
+        // File path retrieved from request
+        // Nodes are retrieved from cluster
+        // File path is added to file manager record
+        // Byte ordinals are generated for file based on nodes
+        // Transaction message is created that has a read request for each node with ordinal positions
+        // Depending on the FileSystemType, read is either receive bytes from home client and write to local file
+        // or, read existing file on distributed file share
+        // Read transaction completed or failed
 
-    // Get nodes
-    let nodes = self.get_nodes();
-    let separator: u8;
+        // Get nodes
+        let nodes = self.get_nodes();
+        let separator: u8;
 
-    if let Some(delim) = delimiter {
-      separator = delim.as_bytes()[0];
-    } else {
-      separator = ",".to_string().as_bytes()[0];
-    }
+        if let Some(delim) = delimiter {
+        separator = delim.as_bytes()[0];
+        } else {
+        separator = ",".to_string().as_bytes()[0];
+        }
 
-    // Inserts hash of file path into FileSystemManager
-    if let Ok(file_path_hash) = self.file_system_manager.read_from_file(file_path.clone(), &nodes) {
-      
-      // Open new transaction
-      if let Some(ref mut transaction) = Message::default_request_message("Transaction") {
-        transaction.set_src("cluster-orchestrator".to_string());
-
-        // TODO
-        // This will pull Node from first element in vector which is not guaranteed to be n1
-        // nodes can also be empty
-        transaction.set_dest(nodes[0].to_string());
-
-        let file_system_type = self.cluster_configuration.working_directory.file_system_type.clone();
-
-        let infered_file_schema = FileSystemManager::get_file_header(file_path.clone(), separator)?;
-        let infered_file_schema_string = serde_json::to_string(&infered_file_schema)?;
-        let byte_ordinals = FileSystemManager::get_byte_ordinals(file_path.clone(), &nodes)?;
-        let byte_ordinals_string = serde_json::to_string(&byte_ordinals)?;
+        // Inserts hash of file path into FileSystemManager
+        if let Ok(file_path_hash) = self.file_system_manager.read_from_file(file_path.clone(), &nodes) {
         
-        if let Some(_file_object) = self.file_system_manager.files.get(&file_path_hash) {
-          transaction.set_body(MessageType::Transaction { txn: vec![vec!["rf".to_string(), file_path.clone(), file_system_type.to_string(), byte_ordinals_string, infered_file_schema_string]] });
-        } else {
-          return Err(ClusterExceptions::UnkownClientRequest { error_message: file_path });
-        }
+        // Open new transaction
+        if let Some(ref mut transaction) = Message::default_request_message("Transaction") {
+            transaction.set_src("cluster-orchestrator".to_string());
 
-        if let Ok(request_string) = message_serializer(&transaction) {
-          return Ok(request_string);
-        } else {
-          return Err(ClusterExceptions::UnkownClientRequest { error_message: file_path });
-        }
+            // TODO
+            // This will pull Node from first element in vector which is not guaranteed to be n1
+            // nodes can also be empty
+            transaction.set_dest(nodes[0].to_string());
 
-      } else {
+            let file_system_type = self.cluster_configuration.working_directory.file_system_type.clone();
+
+            let infered_file_schema = FileSystemManager::get_file_header(file_path.clone(), separator)?;
+            let infered_file_schema_string = serde_json::to_string(&infered_file_schema)?;
+            let byte_ordinals = FileSystemManager::get_byte_ordinals(file_path.clone(), &nodes)?;
+            let byte_ordinals_string = serde_json::to_string(&byte_ordinals)?;
+            
+            if let Some(_file_object) = self.file_system_manager.files.get(&file_path_hash) {
+            transaction.set_body(MessageType::Transaction { txn: vec![vec!["rf".to_string(), file_path.clone(), file_system_type.to_string(), byte_ordinals_string, infered_file_schema_string]] });
+            } else {
+            return Err(ClusterExceptions::UnkownClientRequest { error_message: file_path });
+            }
+
+            if let Ok(request_string) = message_serializer(&transaction) {
+            return Ok(request_string);
+            } else {
+            return Err(ClusterExceptions::UnkownClientRequest { error_message: file_path });
+            }
+
+        } else {
+            return Err(ClusterExceptions::UnkownClientRequest { error_message: file_path });
+        }
+        } else {
         return Err(ClusterExceptions::UnkownClientRequest { error_message: file_path });
-      }
-    } else {
-    return Err(ClusterExceptions::UnkownClientRequest { error_message: file_path });
-    }
+        }
 
-    }
+        }
 
     pub fn display_df(&self, df_name: String, target_node: Option<String>, all_nodes: bool) -> Result<String, ClusterExceptions> {
       let destination_node: String;
@@ -969,6 +1004,58 @@ impl Cluster {
 
       }
 
+    }
+
+    pub async fn send_request_to_node(&mut self, message_id: usize, message_request: Message) -> Result<(), ClusterExceptions> {
+        let destination = message_request
+            .dest()
+            .ok_or_else(|| {
+                ClusterExceptions::InvalidCommand {
+                    error_message:
+                        "Node request missing destination"
+                            .to_string(),
+                }
+            })?
+            .to_string();
+
+        let sender = self
+            .node_request_senders
+            .get(&destination)
+            .ok_or_else(|| {
+                ClusterExceptions::NodeDoesNotExist {
+                    error_message: destination.clone(),
+                }
+            })?
+            .clone();
+
+        match sender.send(message_request).await {
+            Ok(()) => {
+                self.update_message_log(
+                    message_id,
+                    MessageStatus::Sent,
+                )
+                .await?;
+
+                Ok(())
+            }
+
+            Err(error) => {
+                self.update_message_log(
+                    message_id,
+                    MessageStatus::Failed,
+                )
+                .await?;
+
+                Err(
+                    ClusterExceptions::InvalidCommand {
+                        error_message: format!(
+                            "Failed to send request to \
+                            {destination}: {error}"
+                        ),
+                    },
+                )
+            }
+        }
     }
 
 }
