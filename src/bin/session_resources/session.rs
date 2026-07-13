@@ -43,6 +43,7 @@ impl Session {
     if let Err(error) = transaction_manager.query_plan.add_step(&mut transaction_manager.file_system_manager, active_cluster_nodes, request).await {
         return Err(ClusterExceptions::InvalidCommand { error_message: format!("Failed to add request to query plan: {:?}", error) });
     }
+    println!("Successfully added request to query plan: {:?}", transaction_manager.query_plan);
     Ok(())
   }
 
@@ -50,6 +51,7 @@ impl Session {
     let transaction_manager = self.cluster.transaction_manager.as_mut().unwrap();
     let mut executables: Vec<Message> = Vec::new();
 
+    println!("Query plan steps: {:?}", transaction_manager.query_plan.query_plan_steps);
     match execution_target.as_str() {
       "all" => {
         for (_step_id, sub_steps) in transaction_manager.query_plan.query_plan_steps.iter_mut() {

@@ -133,7 +133,7 @@ pub fn structure_bytes(data: &[u8], row_terminator: u8, column_delimiter: u8, he
         Some(file_headers) => {columns = file_headers.clone()},
         None => {columns = HashMap::new()}
     }
-    println!("Column headers {:?}", columns);
+
     // Split buffer by row terminator
     for (iter, line) in data.split(|delimiter| *delimiter == row_terminator).into_iter().enumerate() {
 
@@ -283,7 +283,6 @@ impl FileSystemManager {
         }
 
         let bytes: HashMap<String, Vec<String>> = structure_bytes(&buffer[..], ROW_TERMINATOR, column_delimiter, None);
-
         let mut column_schema_return: HashMap<String, ColumnType> = HashMap::new();
         let column_schema = DataFrame::infer_type(bytes);
 
@@ -293,7 +292,6 @@ impl FileSystemManager {
         }
 
         Ok(column_schema_return)
-
 
     }
 

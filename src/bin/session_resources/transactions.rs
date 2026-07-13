@@ -142,7 +142,7 @@ impl QueryPlan {
                 } else {
                     return Err(ClusterExceptions::InvalidCommand { error_message: "aggregate-extend".to_string() });
                 }
-
+                self.query_plan_steps.insert(query_plan_idx, query_plan_steps);
                 Ok(())
 
             },
@@ -183,7 +183,7 @@ impl QueryPlan {
                         }
                     }
                 }
-
+                self.query_plan_steps.insert(query_plan_idx, query_plan_steps);
                 Ok(())
             }, 
             ClusterCommand::CmdReadFile { target_file_path, target_node, delimiter } => {
@@ -191,18 +191,14 @@ impl QueryPlan {
                 let mut query_plan_steps = HashMap::new();
 
                 let cluster_nodes = active_cluster_nodes.clone();
-                println!("Nodes in cluster: {:?}", cluster_nodes);
                 let full_file_path = format!("{}\\{}", file_system_manager.local_working_directory.clone(), target_file_path);
-                println!("Reading file at path: {}", full_file_path);
-                let separator: u8;
 
                 // TODO: Support other delimiters
-                separator = delimiter.to_string().as_bytes()[0];
+                let separator = delimiter.to_string().as_bytes()[0];
 
                 let file_system_type = file_system_manager.local_working_directory.clone();
                 let infered_file_schema = FileSystemManager::get_file_header(full_file_path.clone(), separator)?;
                 let infered_file_schema_string = serde_json::to_string(&infered_file_schema)?;
-
 
                 // Step 1: Read from file
                 let mut query_plan_step_idx = query_plan_steps.len() + 1;
@@ -249,6 +245,7 @@ impl QueryPlan {
                                 bytes: byte_ordinals_string.clone(),
                                 schema: infered_file_schema_string.clone(),
                             });
+
                             query_plan_steps.insert(query_plan_step_idx, (node.clone(), QueryPlanTypes::ReadFromFile, message_request_string, QueryPlanStatus::Pending));
 
                             query_plan_step_idx += 1;
@@ -256,7 +253,7 @@ impl QueryPlan {
                     }
 
                 }
-
+                self.query_plan_steps.insert(query_plan_idx, query_plan_steps);
                 Ok(())
             },
             ClusterCommand::CmdMessageString { message } => {
@@ -265,8 +262,8 @@ impl QueryPlan {
                 let mut query_plan_steps = HashMap::new();
                 let message_encoded = message_deserializer(&message)?;
 
-                query_plan_steps.insert(query_plan_idx, (message_encoded.dest().clone(), QueryPlanTypes::ReadFromFile, message_encoded.clone(), QueryPlanStatus::Pending));
-
+                query_plan_steps.insert(query_plan_idx, (message_encoded.dest().unwrap().clone(), QueryPlanTypes::ReadFromFile, message_encoded.clone(), QueryPlanStatus::Pending));
+                self.query_plan_steps.insert(query_plan_idx, query_plan_steps);
                 Ok(())
 
             },
