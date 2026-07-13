@@ -14,6 +14,7 @@ use crate::session_resources::exceptions::ClusterExceptions;
 #[derive(Debug, Clone)]
 pub struct FileSystemManager {
     pub accessibility_type: FileSystemType,
+    pub local_working_directory: String,
     pub files: HashMap<usize, FileSystemObject>
 }
 
@@ -55,7 +56,7 @@ pub fn get_file(file_path: String) -> Result<File, ClusterExceptions> {
 }
 
 pub fn get_mmap(file_path: String) -> Result<Mmap, ClusterExceptions> {
-    let file: File = File::open(file_path.clone() )?;
+    let file: File = File::open(file_path.clone())?;
     let mmap = unsafe {  Mmap::map(&file)? };
     Ok(mmap)
 }
@@ -63,6 +64,7 @@ pub fn get_mmap(file_path: String) -> Result<Mmap, ClusterExceptions> {
 
 pub fn read_csv(node: &String, file_path: String, byte_ordinals: String, delimiter: Option<u8>, schema: &String) -> Result<DataFrame, ClusterExceptions> {
     const LINE_TERMINATOR: u8 = 10;
+    println!("Reading CSV file at path: {}", file_path);
 
     // Create file object and reader
     let mmap = get_mmap(file_path.clone())?;
@@ -167,9 +169,10 @@ pub fn structure_bytes(data: &[u8], row_terminator: u8, column_delimiter: u8, he
 
 impl FileSystemManager {
 
-    pub fn new(accessibility: &FileSystemType) -> Self {
+    pub fn new(accessibility: &FileSystemType, local_working_directory: String) -> Self {
         Self {
             accessibility_type: accessibility.clone(),
+            local_working_directory,
             files: HashMap::new()
         }
     }

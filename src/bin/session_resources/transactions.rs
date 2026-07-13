@@ -5,7 +5,6 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use serde_json;
 
-use crate::session_resources::implementation::ImplementationMode;
 use crate::session_resources::message::{MessageFields, MessageType, MessageTypeFields, Message};
 use crate::session_resources::exceptions::ClusterExceptions;
 use crate::session_resources::write_ahead_log::{WalEntry, WriteAheadLog};
@@ -13,10 +12,10 @@ use crate::session_resources::cli::ClusterCommand;
 use crate::session_resources::cluster::ClusterContext;
 use crate::session_resources::file_system::{FileSystemManager};
 use crate::session_resources::message::message_deserializer;
+use crate::session_resources::file_system::FileSystemType;
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct QueryPlan {
-    pub cluster_context: ClusterContext,
     pub query_plan_id: usize,
     pub query_plan_steps: BTreeMap<usize, HashMap<usize, (String, QueryPlanTypes, Message, QueryPlanStatus)>>, // usize is step of query plan; usize is sub-step of query plan step; String = node_id, QueryPlanTypes, String = message string, QueryPlanType Status
 }
@@ -39,10 +38,9 @@ pub enum QueryPlanStatus {
 
 impl QueryPlan {
 
-    pub fn new(cluster_context: ClusterContext) -> Self {
+    pub fn new() -> Self {
 
         QueryPlan {
-            cluster_context,
             query_plan_id: 0,
             query_plan_steps: BTreeMap::new(),
         }
@@ -51,7 +49,7 @@ impl QueryPlan {
 
     // This creates a message type for each request in the cluster command
     // The messages are stored in the query plan steps with the node target, query plan type, message string, and status
-    pub async fn add_step(&mut self, cluster_command: ClusterCommand) -> Result<(), ClusterExceptions> {
+    pub async fn add_step(&mut self, file_system_manager: &mut FileSystemManager, active_cluster_nodes: Vec<String>, cluster_command: ClusterCommand) -> Result<(), ClusterExceptions> {
 
         match cluster_command {
 
@@ -59,7 +57,6 @@ impl QueryPlan {
 
                 let query_plan_idx = self.query_plan_steps.len() + 1;
                 let mut query_plan_steps = HashMap::new();
-                let cluster_config = self.cluster_context.cluster_config.clone();
 
                 // Step 1: Aggregate
                 let query_plan_step_idx = query_plan_steps.len() + 1;
@@ -82,7 +79,7 @@ impl QueryPlan {
                     // Otherwise a separate messaged must be sent to a node to retrieve the schema and that costs more than storing metadata in the cluster
 
                     message_request_string.set_body(MessageType::WriteToFile {
-                        file_path: format!("{}/{}/intermediate_data_file.csv", cluster_config.working_directory.local_path.clone(), target_name),
+                        file_path: format!("{}/{}/intermediate_data_file.csv", file_system_manager.local_working_directory.clone(), target_name),
                         file_format: aggregation_type.clone(),
                         // Schema
                     });
@@ -98,7 +95,7 @@ impl QueryPlan {
                 if let Some(mut message_request_string) = Message::default_request_message("ReadFromFile") {
                     // Assuming the file is stored in the local file system
                     message_request_string.set_body(MessageType::ReadFromFile {
-                        file_path: format!("{}/{}/intermediate_data_file.csv", cluster_config.working_directory.local_path.clone(), target_name),
+                        file_path: format!("{}/{}/intermediate_data_file.csv", file_system_manager.local_working_directory.clone(), target_name),
                         accessibility: "local".to_string(), // Assuming local for now
                         bytes: "".to_string(), // Placeholder for byte ordinals
                         schema: "".to_string(), // Placeholder for schema
@@ -152,7 +149,7 @@ impl QueryPlan {
             ClusterCommand::CmdDisplayDf { target_name, target_node, n_rows } => {
                 let query_plan_idx = self.query_plan_steps.len() + 1;
                 let mut query_plan_steps = HashMap::new();
-                let cluster_nodes = self.cluster_context.nodes.clone();
+                let cluster_nodes = active_cluster_nodes.clone();
 
                 // Step 1: Display DataFrame
                 let query_plan_step_idx = query_plan_steps.len() + 1;
@@ -192,17 +189,18 @@ impl QueryPlan {
             ClusterCommand::CmdReadFile { target_file_path, target_node, delimiter } => {
                 let query_plan_idx = self.query_plan_steps.len() + 1;
                 let mut query_plan_steps = HashMap::new();
-                let cluster_config = self.cluster_context.cluster_config.clone();
-                let mut cluster_fs_manager = self.cluster_context.file_system_manager.clone();
-                let cluster_nodes = self.cluster_context.nodes.clone();
 
+                let cluster_nodes = active_cluster_nodes.clone();
+                println!("Nodes in cluster: {:?}", cluster_nodes);
+                let full_file_path = format!("{}\\{}", file_system_manager.local_working_directory.clone(), target_file_path);
+                println!("Reading file at path: {}", full_file_path);
                 let separator: u8;
 
                 // TODO: Support other delimiters
                 separator = delimiter.to_string().as_bytes()[0];
 
-                let file_system_type = cluster_config.working_directory.file_system_type.clone();
-                let infered_file_schema = FileSystemManager::get_file_header(cluster_config.working_directory.local_path.clone(), separator)?;
+                let file_system_type = file_system_manager.local_working_directory.clone();
+                let infered_file_schema = FileSystemManager::get_file_header(full_file_path.clone(), separator)?;
                 let infered_file_schema_string = serde_json::to_string(&infered_file_schema)?;
 
 
@@ -213,8 +211,8 @@ impl QueryPlan {
 
                     let nodes = target_node.split(',').collect::<Vec<&str>>();
 
-                    let file_path_hash = cluster_fs_manager.read_from_file(cluster_config.working_directory.local_path.clone(), &cluster_nodes)?;
-                    let byte_ordinals = FileSystemManager::get_byte_ordinals(cluster_config.working_directory.local_path.clone(), &cluster_nodes)?;
+                    let file_path_hash = file_system_manager.read_from_file(full_file_path.clone(), &cluster_nodes)?;
+                    let byte_ordinals = FileSystemManager::get_byte_ordinals(full_file_path.clone(), &cluster_nodes)?;
                     let byte_ordinals_string = serde_json::to_string(&byte_ordinals)?;
 
                     for node in nodes.iter() {
@@ -238,8 +236,8 @@ impl QueryPlan {
                     // If target_node is "all", then we need to send the request to all nodes
                     let all_nodes = cluster_nodes;
 
-                    let file_path_hash = cluster_fs_manager.read_from_file(cluster_config.working_directory.local_path.clone(), &all_nodes)?;
-                    let byte_ordinals = FileSystemManager::get_byte_ordinals(cluster_config.working_directory.local_path.clone(), &all_nodes)?;
+                    let file_path_hash = file_system_manager.read_from_file(full_file_path.clone(), &all_nodes)?;
+                    let byte_ordinals = FileSystemManager::get_byte_ordinals(full_file_path.clone(), &all_nodes)?;
                     let byte_ordinals_string = serde_json::to_string(&byte_ordinals)?;
 
                     for node in all_nodes.iter() {
@@ -761,9 +759,9 @@ impl LockManager {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct TransactionManager {
-    pub cluster_context: ClusterContext,
+    pub file_system_manager: FileSystemManager,
     pub query_plan: QueryPlan,
     pub active_transactions: HashMap<usize, Transaction>,
     pub lock_manager: LockManager,
@@ -772,15 +770,16 @@ pub struct TransactionManager {
 }
 
 impl TransactionManager {
-    pub fn new(wal_path: &str, cluster_context: ClusterContext) -> Self {
+    pub fn new(wal_path: &str, accessibility_type: &FileSystemType, local_working_directory: &String) -> Self {
         TransactionManager {
-            cluster_context: cluster_context.clone(),
-            query_plan: QueryPlan::new(cluster_context),
+            file_system_manager: FileSystemManager::new(accessibility_type, local_working_directory.clone()),
+            query_plan: QueryPlan::new(),
             active_transactions: HashMap::new(),
             lock_manager: LockManager::new(),
             wal: Arc::new(Mutex::new(WriteAheadLog::new(wal_path).expect("Failed to initialize WAL"))),
             database: HashMap::new(),
         }
+
     }
 
     // pub async fn process_plan() {

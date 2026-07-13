@@ -48,7 +48,7 @@ _Send, Poll, List, and Committ Offsets
 _File Reading & Display
 -a display-df -df_name df_broadcast -all-nodes true
 
-read-file -fp C:\rust\projects\rust-bdc\test_data.txt -delimiter |
+read-file -fp "C:\rust\projects\rust-bdc\test_data.txt" -delimiter |
 -a display-df -df_name df -all-nodes true
 
 -- Display Dfs
@@ -57,6 +57,7 @@ read-file -fp C:\rust\projects\rust-bdc\test_data.txt -delimiter |
 
 log -target cluster/nodes
 
+read-file -fp test_data.txt -delimiter | -target-node all
 
 cargo run --bin cluster_server "C:\rust\projects\rust-bdc\config.toml" true
 cargo run --bin node_client 127.0.0.1:80886 node-1 127.0.0.1:80888 C:\\rust\\projects\\rust-bdc

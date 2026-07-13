@@ -782,7 +782,8 @@ impl Message {
                     | LogNodeMessages { .. }
                     | LogNodeMessagesOk { .. }
                     | LogClusterMessages { .. }
-                    | LogClusterMessagesOk { .. } => MsgKind::Control,
+                    | LogClusterMessagesOk { .. }
+                    | RemoteConnectOk { .. } => MsgKind::Control,
 
                     // Everything else is task/data-plane for now
                     _ => MsgKind::Task,

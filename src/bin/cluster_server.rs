@@ -68,15 +68,10 @@ async fn main() {
   
 
   // Startup node init commands
-{  
   let node_init_message: &String = &format!(r#"-message {{"type":"init","msg_id":0,"node_id":"node-master","node_ids":{:?}}}"#, other_nodes);
-  cli_tx.send(node_init_message.to_string());
-
-  for node_id in other_nodes.clone() {
-    let node_init_message: &String = &format!(r#"-message {{"type":"init","msg_id":0,"node_id":"{node_id}","node_ids":{:?}}}"#, other_nodes);
-    cli_tx.send(node_init_message.to_string());
+  if let Err(error) = cli_tx.send(node_init_message.to_string()).await {
+      println!("Error sending node init message: {:?}", error);
   }
-}
 
   // This loops accepts client requests
   loop {

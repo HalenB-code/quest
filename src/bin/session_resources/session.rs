@@ -37,9 +37,10 @@ impl Session {
   }
 
   pub async fn add_current_request_to_query_plan(&mut self, request: ClusterCommand) -> Result<(), ClusterExceptions> {
+    let active_cluster_nodes = self.cluster.get_nodes().clone();
     let transaction_manager = self.cluster.transaction_manager.as_mut().unwrap();
     
-    if let Err(error) = transaction_manager.query_plan.add_step(request).await {
+    if let Err(error) = transaction_manager.query_plan.add_step(&mut transaction_manager.file_system_manager, active_cluster_nodes, request).await {
         return Err(ClusterExceptions::InvalidCommand { error_message: format!("Failed to add request to query plan: {:?}", error) });
     }
     Ok(())
