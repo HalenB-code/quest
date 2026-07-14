@@ -64,7 +64,6 @@ pub fn get_mmap(file_path: String) -> Result<Mmap, ClusterExceptions> {
 
 pub fn read_csv(node: &String, file_path: String, byte_ordinals: String, delimiter: Option<u8>, schema: &String) -> Result<DataFrame, ClusterExceptions> {
     const LINE_TERMINATOR: u8 = 10;
-    println!("Reading CSV file at path: {}", file_path);
 
     // Create file object and reader
     let mmap = get_mmap(file_path.clone())?;
@@ -75,27 +74,10 @@ pub fn read_csv(node: &String, file_path: String, byte_ordinals: String, delimit
     // Nodes that are not allocated the first line in byte_ordinals will not have file headers
     // Supplied schema should be used for these nodes to obtain correct column names
     let mut headers: HashMap<usize, String> = HashMap::new();
-    let schema: Option<HashMap<usize, String>>;
 
-    for (node_name, byte_positions) in &get_byte_ordinals {
-        if node_name == node {
-            // If the starting byte position for the node calling read_csv is 0 - headers will be read from the first line of the file
-            // If not, headers need to be supplied
-            if byte_positions[0] == 0 {
-                continue
-            } else {
-                for (idx, (column, column_type)) in file_schema.iter().enumerate() {
-                    headers.insert(idx, column.clone());
-                }
-            }
-        }
-    }
-
-    if headers.len() == 0 {
-        schema = None;
-    } else {
-        schema = Some(headers);
-    }
+    for (idx, (column, column_type)) in file_schema.iter().enumerate() {
+        headers.insert(idx, column.clone());
+    };
 
     if let Some(byte_positions) = get_byte_positions {
         let bytes = byte_positions.1;
@@ -111,8 +93,9 @@ pub fn read_csv(node: &String, file_path: String, byte_ordinals: String, delimit
             // Default to , if no delimiter supplied in function call
             separator = 44 as u8;
         }
-    
-        let raw_data = structure_bytes(bytes_mmap, LINE_TERMINATOR, separator, schema);
+        println!("Reading CSV for node {} with byte positions: {:?}, separator: {}, headers: {:?}", node, bytes, separator, headers);
+        let raw_data = structure_bytes(bytes_mmap, LINE_TERMINATOR, separator, Some(headers));
+        println!("Raw data for node {}: {:?}", node, raw_data);
         let df = DataFrame::new(Some(raw_data));
     
         Ok(df)
@@ -130,8 +113,16 @@ pub fn structure_bytes(data: &[u8], row_terminator: u8, column_delimiter: u8, he
 
     // Used to store index position of value for each column: 0: Col_1, 1: Col_2, 2: Col_3
     match &headers {
-        Some(file_headers) => {columns = file_headers.clone()},
-        None => {columns = HashMap::new()}
+        Some(file_headers) => { 
+            columns = file_headers.clone();
+
+            for column in columns.iter() {
+                bytes.insert(column.1.clone(), vec![]);
+            };
+        },
+        None => {
+            columns = HashMap::new()
+        }
     }
 
     // Split buffer by row terminator
@@ -143,16 +134,20 @@ pub fn structure_bytes(data: &[u8], row_terminator: u8, column_delimiter: u8, he
             // Convert ASCII bytes to string
             if let Ok(ascii_line) = String::from_utf8(value.to_vec()) {
 
-                // On first line of file, only extract values as file headers if headers.is_none() = true. This means we are switching to received headers as column names
-                if iter == 0 {
-                    if headers.is_some() {
-                        bytes.insert(ascii_line.clone().trim_ascii().to_string(), vec![]);
+                // This function is called by get_headers() and by read_csv()
+                // get_headers() returns the headers
+                // read_csv() returns the data
+
+                if headers.is_none() {
+                    // On first line of file, only extract values as file headers if headers.is_none() = true. This means we are switching to received headers as column names
+                    if iter == 0 {
+                        bytes.insert(ascii_line.clone().trim_ascii().to_string(), Vec::with_capacity(1));
                     } else {
-                        bytes.insert(ascii_line.clone().trim_ascii().to_string(), vec![]);
-                        columns.insert(idx, ascii_line.clone().trim_ascii().to_string());
-                    }
-                }
-                else {
+                        break
+                    } 
+                } else {
+                    // The data needing to be parsed and captured in the Column vecs in bytes will never contain the header for the file
+                    // That is removed in byte ordinals using the header_bytes field which determines on which byte index the first line terminates
                     if let Some(column) = columns.get_key_value(&idx) {
                         if let Some(column_data) = bytes.get_mut(column.1) {
                             column_data.push(ascii_line.clone().trim_ascii().to_string());
@@ -184,12 +179,15 @@ impl FileSystemManager {
 
         // Create file object and reader
         let mmap = get_mmap(file_path.clone())?;
-
+        println!("Total bytes in file: {}", mmap.len());
+        let header_bytes = mmap.iter().position(|&x| x == ROW_TERMINATOR).map(|position| position + 1).expect("Row terminator not found");
         // _1__ Determine number of lines in file
         let no_crlf = Arc::new(Mutex::new(0_usize));
+        // TODO: Exclude header bytes so each node is only reading data; schema of data is passed in message request to each node and used to create DataFrame
         let total_bytes = mmap[..].len();
         let modulo: usize = total_bytes % n_threads;
         let chunk_size: usize = (total_bytes - modulo) / n_threads;
+        print!("Total bytes: {}, Chunk size: {}, Modulo: {}, Header bytes: {}", total_bytes, chunk_size, modulo, header_bytes);
         let mmap_positions: Arc<Mutex<BTreeMap<String, (usize, usize)>>> = Arc::new(Mutex::new(BTreeMap::new()));
         let nodes = Arc::new(nodes);
     
@@ -213,7 +211,7 @@ impl FileSystemManager {
                 else {
                 end_pos += chunk_size;
                 }
-        
+                println!("Thread {}: Start position: {}, End position: {}", n, start_pos, end_pos);
                 let thread_mmap = &mmap[start_pos..end_pos];
                 
                 s.spawn(move || {
@@ -239,6 +237,7 @@ impl FileSystemManager {
         });
 
         let stamped_byte_ordinals = mmap_positions.lock();
+        println!("Stamped byte ordinals: {:?}", stamped_byte_ordinals.as_ref());
 
         let mut next_block_start_position: usize = 0;
         let mut final_mmap_positions: BTreeMap<String, (usize, usize)> = BTreeMap::new();
@@ -247,7 +246,8 @@ impl FileSystemManager {
         
             match n {
             0 => {
-                final_mmap_positions.insert(node, (0, positions.1));
+                // Bump first node to start after header bytes
+                final_mmap_positions.insert(node, (header_bytes, positions.1));
             },
             x if x > 0 => {
             final_mmap_positions.insert(node, (next_block_start_position, positions.1));
