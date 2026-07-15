@@ -5,6 +5,8 @@ use crate::session_resources::implementation::ImplementationMode;
 use crate::session_resources::message::{Message, message_serializer};
 use crate::session_resources::cluster::{Cluster};
 use crate::session_resources::exceptions::ClusterExceptions;
+use crate::session_resources::transactions::{QueryPlanStatus};
+use crate::session_resources::message::MessageFields;
 
 // Session Class
 // The session is created to manage the overall execution of client requests
@@ -36,43 +38,54 @@ impl Session {
     }
   }
 
-  pub async fn add_current_request_to_query_plan(&mut self, request: ClusterCommand) -> Result<(), ClusterExceptions> {
+  pub async fn add_current_request_to_query_plan(&mut self, request: ClusterCommand) -> Result<usize, ClusterExceptions> {
     let active_cluster_nodes = self.cluster.get_nodes().clone();
     let transaction_manager = self.cluster.transaction_manager.as_mut().unwrap();
     
-    if let Err(error) = transaction_manager.query_plan.add_step(&mut transaction_manager.file_system_manager, active_cluster_nodes, request).await {
-        return Err(ClusterExceptions::InvalidCommand { error_message: format!("Failed to add request to query plan: {:?}", error) });
+    match transaction_manager.query_plan.add_step(&mut transaction_manager.file_system_manager, active_cluster_nodes, request).await {
+      Ok(step_id) => {
+        return Ok(step_id);
+      },
+      Err(error) => {
+      return Err(ClusterExceptions::InvalidCommand { error_message: format!("Failed to add request to query plan: {:?}", error) });
+      }
     }
-    println!("Successfully added request to query plan: {:?}", transaction_manager.query_plan);
-    Ok(())
   }
 
-  pub fn get_executables(&mut self, execution_target: String) -> Vec<Message> {
+  pub fn get_executables(&mut self, execution_target: Option<usize>) -> Vec<(String, Message)> {
     let transaction_manager = self.cluster.transaction_manager.as_mut().unwrap();
-    let mut executables: Vec<Message> = Vec::new();
+    let mut executables: Vec<(String, Message)> = Vec::new();
 
     println!("Query plan steps: {:?}", transaction_manager.query_plan.query_plan_steps);
-    match execution_target.as_str() {
-      "all" => {
-        for (_step_id, sub_steps) in transaction_manager.query_plan.query_plan_steps.iter_mut() {
-          for (_substep_id, substep_details) in sub_steps.iter_mut() {
-            let message_request = &mut substep_details.2;
-            executables.push(message_request.clone());
+    match execution_target {
+
+      Some(target_step_id) => {
+        for (step_id, sub_steps) in transaction_manager.query_plan.query_plan_steps.iter_mut() {
+
+          if &target_step_id == step_id {
+
+            for (_substep_id, substep_details) in sub_steps.iter_mut() {
+
+              let (message_id, _, message_request, message_status) = &substep_details;
+
+              if message_status == &QueryPlanStatus::Pending {
+                executables.push((message_id.to_string(), message_request.clone()));
+              }
+            }
           }
         }
       },
-      _ => {
+      None => {
         for (_step_id, sub_steps) in transaction_manager.query_plan.query_plan_steps.iter_mut() {
-          // TODO: Add check to ensure only 1 substep is returned for the execution target, if more than 1, return error to client
-          let i = 0;
           for (_substep_id, substep_details) in sub_steps.iter_mut() {
-            let message_request = &mut substep_details.2;
-            if i == 0 {
-              executables.push(message_request.clone());
-            }
-            else {
-              break
-            }
+
+            let (message_id, _, message_request, message_status) = &substep_details;
+
+              if message_status == &QueryPlanStatus::Pending {
+                  executables.push((message_id.to_string(), message_request.clone()));
+              } else {
+                continue
+              }
           }
         }
       }
@@ -81,13 +94,25 @@ impl Session {
     return executables;
   }
 
-  pub async fn execute_executables(&mut self, executables: Vec<Message>) -> Result<(), ClusterExceptions> {
-    for executable in executables {
+  pub async fn execute_executables(&mut self, query_plan_step_id: Option<usize>, executables: Vec<(String, Message)>) -> Result<(), ClusterExceptions> {
+    
+    for (executable_id, executable) in executables {
       let serialized_message = message_serializer(&executable);
 
       match serialized_message {
         Ok(serialized) => {
-          self.cluster.categorize_and_queue(serialized).await?;
+          let execution_result = self.cluster.categorize_and_queue(serialized).await;
+
+          match execution_result {
+            Ok(_) => {
+              let transaction_manager = self.cluster.transaction_manager.as_mut().unwrap();
+              transaction_manager.query_plan.update_step_status(query_plan_step_id, executable_id, QueryPlanStatus::Complete)?;
+            },
+            Err(_) => {
+              let transaction_manager = self.cluster.transaction_manager.as_mut().unwrap();
+              transaction_manager.query_plan.update_step_status(query_plan_step_id, executable_id, QueryPlanStatus::Failed)?;
+            }
+          };
         },
         Err(error) => {
           return Err(ClusterExceptions::InvalidCommand { error_message: format!("Failed to serialize message: {:?}", error) });
@@ -119,17 +144,23 @@ impl Session {
 
               // TODO: Add a check to see if the request is a valid command, if not, return an error message to the client
               let cli_mapped_request = ClusterCommand::map_command_line_request(cli_request.unwrap());
-              let list_of_executables: Vec<Message>;
+              let list_of_executables: Vec<(String, Message)>;
 
               match cli_mapped_request {
 
                 Ok(mapped_request) => {
 
                   println!("Mapped request: {:?}", mapped_request);
+                  let target_step_id: usize;
 
-                  if let Err(error) = self.add_current_request_to_query_plan(mapped_request.clone()).await {
-                      eprintln!("Error adding request to query plan: {:?}", error);
-                      continue;
+                  match self.add_current_request_to_query_plan(mapped_request.clone()).await {
+                      Ok(step_id) => {
+                        target_step_id = step_id;
+                      }
+                      Err(error) => {
+                        eprintln!("Error adding request to query plan: {:?}", error);
+                        continue;
+                      }
                   }
 
                   match is_eager_execution {
@@ -137,9 +168,9 @@ impl Session {
                     // Execute each step in QueryPlan immediately after it is added to the plan
                     true => {
 
-                      list_of_executables = self.get_executables("".to_string());
+                      list_of_executables = self.get_executables(Some(target_step_id));
                       println!("Executing request: {:?}", list_of_executables);
-                      self.execute_executables(list_of_executables).await.unwrap_or_else(|error| {
+                      self.execute_executables(Some(target_step_id), list_of_executables).await.unwrap_or_else(|error| {
                         println!("Error executing request: {:?}", error);
                       });
 
@@ -149,8 +180,8 @@ impl Session {
                       match mapped_request {
                         ClusterCommand::CmdExecute { .. } => {
                           // TODO: Remove unwrap and handle error if transaction_manager is None
-                          list_of_executables = self.get_executables("all".to_string());
-                          self.execute_executables(list_of_executables).await.unwrap_or_else(|error| {
+                          list_of_executables = self.get_executables(None);
+                          self.execute_executables(None, list_of_executables).await.unwrap_or_else(|error| {
                             println!("Error executing request: {:?}", error);
                             });
                         },

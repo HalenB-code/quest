@@ -93,9 +93,7 @@ pub fn read_csv(node: &String, file_path: String, byte_ordinals: String, delimit
             // Default to , if no delimiter supplied in function call
             separator = 44 as u8;
         }
-        println!("Reading CSV for node {} with byte positions: {:?}, separator: {}, headers: {:?}", node, bytes, separator, headers);
         let raw_data = structure_bytes(bytes_mmap, LINE_TERMINATOR, separator, Some(headers));
-        println!("Raw data for node {}: {:?}", node, raw_data);
         let df = DataFrame::new(Some(raw_data));
     
         Ok(df)
@@ -179,7 +177,7 @@ impl FileSystemManager {
 
         // Create file object and reader
         let mmap = get_mmap(file_path.clone())?;
-        println!("Total bytes in file: {}", mmap.len());
+
         let header_bytes = mmap.iter().position(|&x| x == ROW_TERMINATOR).map(|position| position + 1).expect("Row terminator not found");
         // _1__ Determine number of lines in file
         let no_crlf = Arc::new(Mutex::new(0_usize));
@@ -187,7 +185,7 @@ impl FileSystemManager {
         let total_bytes = mmap[..].len();
         let modulo: usize = total_bytes % n_threads;
         let chunk_size: usize = (total_bytes - modulo) / n_threads;
-        print!("Total bytes: {}, Chunk size: {}, Modulo: {}, Header bytes: {}", total_bytes, chunk_size, modulo, header_bytes);
+
         let mmap_positions: Arc<Mutex<BTreeMap<String, (usize, usize)>>> = Arc::new(Mutex::new(BTreeMap::new()));
         let nodes = Arc::new(nodes);
     
@@ -211,7 +209,7 @@ impl FileSystemManager {
                 else {
                 end_pos += chunk_size;
                 }
-                println!("Thread {}: Start position: {}, End position: {}", n, start_pos, end_pos);
+
                 let thread_mmap = &mmap[start_pos..end_pos];
                 
                 s.spawn(move || {
@@ -237,7 +235,6 @@ impl FileSystemManager {
         });
 
         let stamped_byte_ordinals = mmap_positions.lock();
-        println!("Stamped byte ordinals: {:?}", stamped_byte_ordinals.as_ref());
 
         let mut next_block_start_position: usize = 0;
         let mut final_mmap_positions: BTreeMap<String, (usize, usize)> = BTreeMap::new();

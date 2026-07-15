@@ -829,6 +829,15 @@ impl Message {
                     }
                 )
             }),
+            "DisplayDf" => Some(Message::Request { 
+                src: "node-master".to_string(), 
+                dest: "default".to_string(), 
+                body: (
+                    MessageType::DisplayDf { 
+                        df_name: "".to_string(), total_rows: 1 
+                    } 
+                )
+            }),
             _ => None,
         }
     }

@@ -4,12 +4,13 @@ use serde::{Serialize, Deserialize};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use serde_json;
+use std::time::{SystemTime, UNIX_EPOCH};
+use chrono::{DateTime, Local};
 
 use crate::session_resources::message::{MessageFields, MessageType, MessageTypeFields, Message};
 use crate::session_resources::exceptions::ClusterExceptions;
 use crate::session_resources::write_ahead_log::{WalEntry, WriteAheadLog};
 use crate::session_resources::cli::ClusterCommand;
-use crate::session_resources::cluster::ClusterContext;
 use crate::session_resources::file_system::{FileSystemManager};
 use crate::session_resources::message::message_deserializer;
 use crate::session_resources::file_system::FileSystemType;
@@ -17,7 +18,7 @@ use crate::session_resources::file_system::FileSystemType;
 #[derive(Debug)]
 pub struct QueryPlan {
     pub query_plan_id: usize,
-    pub query_plan_steps: BTreeMap<usize, HashMap<usize, (String, QueryPlanTypes, Message, QueryPlanStatus)>>, // usize is step of query plan; usize is sub-step of query plan step; String = node_id, QueryPlanTypes, String = message string, QueryPlanType Status
+    pub query_plan_steps: BTreeMap<usize, BTreeMap<usize, (String, QueryPlanTypes, Message, QueryPlanStatus)>>, // usize is step of query plan; usize is sub-step of query plan step; String = node_id, QueryPlanTypes, String = message string, QueryPlanType Status
 }
 
 #[derive(Debug, Clone)]
@@ -29,12 +30,80 @@ pub enum QueryPlanTypes {
     DisplayDf
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum QueryPlanStatus {
     Pending,
     Complete,
     Failed
 }
+
+fn generate_query_plan_step_id(node_id: &String) -> String {
+
+    let alphabet_lookup: HashMap<usize, char> = HashMap::from([
+        (0, 'X')
+        , (1, 'a')
+        , (2, 'b')
+        , (3, 'c')
+        , (4, 'd')
+        , (5, 'e')
+        , (6, 'f')
+        , (7, 'g')
+        , (8, 'h')
+        , (9, 'i')
+        , (10, 'j')
+        , (11, 'k')
+        , (12, 'l')
+        , (13, 'm')
+        , (14, 'n')
+        , (15, 'p')
+        , (16, 'o')
+        , (17, 'q')
+        , (18, 'r')
+        , (19, 's')
+        , (20, 't')
+        , (21, 'u')
+        , (22, 'v')
+        , (23, 'w')
+        , (24, 'x')
+        , (25, 'y')
+        , (26, 'z')
+    ]);
+
+
+    // Get the current system time
+    let now = SystemTime::now();
+
+    // Convert to DateTime<Local> for formatting
+    let datetime: DateTime<Local> = now.into();
+
+    // Format using strftime-like patterns
+    let formatted_datetime = datetime.format("%Y%m%d%H%M%S%f").to_string();
+
+    // Create uuid
+    let mut uuid = String::with_capacity(26);
+    
+    for c in node_id.chars() {
+        uuid.push(c);
+    }
+    uuid.push('-');
+
+    for (i, c) in formatted_datetime.chars().enumerate() {
+
+        if i == 0 {
+                uuid.push(*alphabet_lookup.get(&c.to_string().parse::<usize>().unwrap()).unwrap());
+            }
+            else {
+                if i % 2 == 0 {
+                    uuid.push(c);
+                } else {
+                    uuid.push(*alphabet_lookup.get(&c.to_string().parse::<usize>().unwrap()).unwrap());
+                }
+            }
+
+        }
+    uuid
+}
+    
 
 impl QueryPlan {
 
@@ -49,14 +118,14 @@ impl QueryPlan {
 
     // This creates a message type for each request in the cluster command
     // The messages are stored in the query plan steps with the node target, query plan type, message string, and status
-    pub async fn add_step(&mut self, file_system_manager: &mut FileSystemManager, active_cluster_nodes: Vec<String>, cluster_command: ClusterCommand) -> Result<(), ClusterExceptions> {
+    pub async fn add_step(&mut self, file_system_manager: &mut FileSystemManager, active_cluster_nodes: Vec<String>, cluster_command: ClusterCommand) -> Result<usize, ClusterExceptions> {
 
         match cluster_command {
 
             ClusterCommand::CmdGroupBy { target_name, aggregation_keys, aggregation_type } => {
 
                 let query_plan_idx = self.query_plan_steps.len() + 1;
-                let mut query_plan_steps = HashMap::new();
+                let mut query_plan_steps = BTreeMap::new();
 
                 // Step 1: Aggregate
                 let query_plan_step_idx = query_plan_steps.len() + 1;
@@ -67,7 +136,7 @@ impl QueryPlan {
                         keys: aggregation_keys.clone(),
                         agg_type: aggregation_type.clone(),
                     });
-                    query_plan_steps.insert(query_plan_step_idx, (target_name.clone(), QueryPlanTypes::Aggregate, message_request_string, QueryPlanStatus::Pending));
+                    query_plan_steps.insert(query_plan_step_idx, (generate_query_plan_step_id(message_request_string.dest().unwrap()), QueryPlanTypes::Aggregate, message_request_string, QueryPlanStatus::Pending));
 
                 } else {
                     return Err(ClusterExceptions::InvalidCommand { error_message: "aggregate".to_string() });
@@ -85,7 +154,7 @@ impl QueryPlan {
                     });
                     let query_plan_step_idx = query_plan_steps.len() + 1;
 
-                    query_plan_steps.insert(query_plan_step_idx, (target_name.clone(), QueryPlanTypes::WriteToFile, message_request_string, QueryPlanStatus::Pending));
+                    query_plan_steps.insert(query_plan_step_idx, (generate_query_plan_step_id(message_request_string.dest().unwrap()), QueryPlanTypes::WriteToFile, message_request_string, QueryPlanStatus::Pending));
 
                 } else {
                     return Err(ClusterExceptions::InvalidCommand { error_message: "write_to_file".to_string() });
@@ -102,7 +171,7 @@ impl QueryPlan {
                     });
 
                     let query_plan_step_idx = query_plan_steps.len() + 1;
-                    query_plan_steps.insert(query_plan_step_idx, (target_name.clone(), QueryPlanTypes::ReadFromFile, message_request_string, QueryPlanStatus::Pending));
+                    query_plan_steps.insert(query_plan_step_idx, (generate_query_plan_step_id(message_request_string.dest().unwrap()), QueryPlanTypes::ReadFromFile, message_request_string, QueryPlanStatus::Pending));
 
                 } else {
                     return Err(ClusterExceptions::InvalidCommand { error_message: "read-from-file".to_string() });
@@ -120,7 +189,7 @@ impl QueryPlan {
                     });
 
                     let query_plan_step_idx = query_plan_steps.len() + 1;
-                    query_plan_steps.insert(query_plan_step_idx, (target_name.clone(), QueryPlanTypes::AggregateExtend, message_request_string, QueryPlanStatus::Pending));
+                    query_plan_steps.insert(query_plan_step_idx, (generate_query_plan_step_id(message_request_string.dest().unwrap()), QueryPlanTypes::AggregateExtend, message_request_string, QueryPlanStatus::Pending));
 
                 } else {
                     return Err(ClusterExceptions::InvalidCommand { error_message: "aggregate-extend-union".to_string() });
@@ -137,18 +206,18 @@ impl QueryPlan {
                     });
 
                     let query_plan_step_idx = query_plan_steps.len() + 1;
-                    query_plan_steps.insert(query_plan_step_idx, (target_name.clone(), QueryPlanTypes::AggregateExtend, message_request_string, QueryPlanStatus::Pending));
+                    query_plan_steps.insert(query_plan_step_idx, (generate_query_plan_step_id(message_request_string.dest().unwrap()), QueryPlanTypes::AggregateExtend, message_request_string, QueryPlanStatus::Pending));
 
                 } else {
                     return Err(ClusterExceptions::InvalidCommand { error_message: "aggregate-extend".to_string() });
                 }
                 self.query_plan_steps.insert(query_plan_idx, query_plan_steps);
-                Ok(())
+                return Ok(query_plan_idx);
 
             },
             ClusterCommand::CmdDisplayDf { target_name, target_node, n_rows } => {
                 let query_plan_idx = self.query_plan_steps.len() + 1;
-                let mut query_plan_steps = HashMap::new();
+                let mut query_plan_steps = BTreeMap::new();
                 let cluster_nodes = active_cluster_nodes.clone();
 
                 // Step 1: Display DataFrame
@@ -162,7 +231,7 @@ impl QueryPlan {
                             total_rows: n_rows,
                         });
 
-                        query_plan_steps.insert(query_plan_step_idx, (target_name.clone(), QueryPlanTypes::DisplayDf, message_request_string, QueryPlanStatus::Pending));
+                        query_plan_steps.insert(query_plan_step_idx, (generate_query_plan_step_id(message_request_string.dest().unwrap()), QueryPlanTypes::DisplayDf, message_request_string, QueryPlanStatus::Pending));
                     } else {
                         return Err(ClusterExceptions::InvalidCommand { error_message: "display-df".to_string() });
                     }
@@ -179,16 +248,16 @@ impl QueryPlan {
                                 df_name: target_name.clone(),
                                 total_rows: n_rows,
                             });
-                        query_plan_steps.insert(query_plan_step_idx, (node.clone(), QueryPlanTypes::DisplayDf, message_request_string, QueryPlanStatus::Pending));
+                        query_plan_steps.insert(query_plan_step_idx, (generate_query_plan_step_id(message_request_string.dest().unwrap()), QueryPlanTypes::DisplayDf, message_request_string, QueryPlanStatus::Pending));
                         }
                     }
                 }
                 self.query_plan_steps.insert(query_plan_idx, query_plan_steps);
-                Ok(())
+                return Ok(query_plan_idx);
             }, 
             ClusterCommand::CmdReadFile { target_file_path, target_node, delimiter } => {
                 let query_plan_idx = self.query_plan_steps.len() + 1;
-                let mut query_plan_steps = HashMap::new();
+                let mut query_plan_steps = BTreeMap::new();
 
                 let cluster_nodes = active_cluster_nodes.clone();
                 let full_file_path = format!("{}\\{}", file_system_manager.local_working_directory.clone(), target_file_path);
@@ -221,7 +290,7 @@ impl QueryPlan {
                                 bytes: byte_ordinals_string.clone(),
                                 schema: infered_file_schema_string.clone(),
                             });
-                            query_plan_steps.insert(query_plan_step_idx, (target_file_path.clone(), QueryPlanTypes::ReadFromFile, message_request_string, QueryPlanStatus::Pending));
+                            query_plan_steps.insert(query_plan_step_idx, (generate_query_plan_step_id(message_request_string.dest().unwrap()), QueryPlanTypes::ReadFromFile, message_request_string, QueryPlanStatus::Pending));
 
                             query_plan_step_idx += 1;
                         }
@@ -246,7 +315,7 @@ impl QueryPlan {
                                 schema: infered_file_schema_string.clone(),
                             });
 
-                            query_plan_steps.insert(query_plan_step_idx, (node.clone(), QueryPlanTypes::ReadFromFile, message_request_string, QueryPlanStatus::Pending));
+                            query_plan_steps.insert(query_plan_step_idx, (generate_query_plan_step_id(message_request_string.dest().unwrap()), QueryPlanTypes::ReadFromFile, message_request_string, QueryPlanStatus::Pending));
 
                             query_plan_step_idx += 1;
                         }
@@ -254,17 +323,17 @@ impl QueryPlan {
 
                 }
                 self.query_plan_steps.insert(query_plan_idx, query_plan_steps);
-                Ok(())
+                return Ok(query_plan_idx);
             },
             ClusterCommand::CmdMessageString { message } => {
 
                 let query_plan_idx = self.query_plan_steps.len() + 1;
-                let mut query_plan_steps = HashMap::new();
+                let mut query_plan_steps = BTreeMap::new();
                 let message_encoded = message_deserializer(&message)?;
 
-                query_plan_steps.insert(query_plan_idx, (message_encoded.dest().unwrap().clone(), QueryPlanTypes::ReadFromFile, message_encoded.clone(), QueryPlanStatus::Pending));
+                query_plan_steps.insert(query_plan_idx, (generate_query_plan_step_id(message_encoded.dest().unwrap()), QueryPlanTypes::ReadFromFile, message_encoded.clone(), QueryPlanStatus::Pending));
                 self.query_plan_steps.insert(query_plan_idx, query_plan_steps);
-                Ok(())
+                return Ok(query_plan_idx);
 
             },
             _ => {
@@ -289,6 +358,43 @@ impl QueryPlan {
             all_steps.push(*step_id);
         }
         all_steps
+    }
+
+    pub fn update_step_status(&mut self, target_step_id: Option<usize>, message_id: String, new_status: QueryPlanStatus) -> Result<(), ClusterExceptions> {
+
+        match target_step_id {
+            Some(target_step_id) => {
+                for (step_id, step_details) in self.query_plan_steps.iter_mut() {
+                    
+                    if &target_step_id == step_id {
+                        for (_sub_step_id, (query_plan_message_id, _, _, message_status)) in step_details.iter_mut() {
+
+                            if query_plan_message_id.clone() == message_id {
+                                *message_status = new_status.clone();
+                            } else {
+                                continue
+                            }
+                        };
+                    }
+                }
+                return Ok(());
+            },
+            None => {
+                for (step_id, step_details) in self.query_plan_steps.iter_mut() {
+                    
+                    for (_sub_step_id, (query_plan_message_id, _, _, message_status)) in step_details.iter_mut() {
+
+                        if query_plan_message_id.clone() == message_id {
+                            *message_status = new_status.clone();
+                        } else {
+                            continue
+                        }
+                    };
+                }
+                return Ok(());
+            }
+        }
+
     }
 }
 
