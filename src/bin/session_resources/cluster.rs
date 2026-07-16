@@ -201,7 +201,9 @@ impl Cluster {
     }
 
     pub fn get_nodes(&self) -> Vec<String> {
-        self.nodes.keys().cloned().collect()
+        // Exclude node-master as it is technically not an executable node
+        // TODO: Add configuration to activate node-master as processing node on client machine
+        self.nodes.keys().cloned().filter(|x| x != &"node-master".to_string()).collect()
     }
 
     pub fn count_nodes(&self) -> usize {

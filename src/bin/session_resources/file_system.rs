@@ -114,8 +114,10 @@ pub fn structure_bytes(data: &[u8], row_terminator: u8, column_delimiter: u8, he
         Some(file_headers) => { 
             columns = file_headers.clone();
 
-            for column in columns.iter() {
-                bytes.insert(column.1.clone(), vec![]);
+            let number_of_keys = file_headers.keys().len();
+
+            for i in 0..number_of_keys {
+                bytes.insert(file_headers.get(&i).unwrap().to_string(), vec![]);
             };
         },
         None => {

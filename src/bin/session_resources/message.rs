@@ -720,7 +720,7 @@ impl MessageTypeFields for MessageType {
     }
 
     fn df_name(&self) -> Option<&String> {
-        if let MessageType::DisplayDf { df_name, .. } = self {
+        if let MessageType::DisplayDf { df_name, .. } | MessageType::Aggregate { df_name, .. } = self {
             Some(df_name)
         } else {
             None

@@ -61,6 +61,12 @@ pub enum ClusterCommand {
         */
         target_name: String,
         /*
+            long = "-target-nodes",
+            help = ""
+            default_value = ""
+        */
+        target_node: String,
+        /*
             long = "-keys",
             help = ""
             default_value = ""
@@ -130,6 +136,7 @@ impl ClusterCommand {
             }),
             "group-by" => Ok(ClusterCommand::CmdGroupBy {
                 target_name: "".to_string(),
+                target_node: "".to_string(),
                 aggregation_keys: "".to_string(),
                 aggregation_type: "".to_string(),
             }),
@@ -210,6 +217,7 @@ impl ClusterCommand {
             ClusterCommand::CmdGroupBy { .. } => {
                 let mapped_action = ClusterCommand::CmdGroupBy {
                     target_name: remainig_args.get("-df_name").unwrap_or(&"".to_string()).to_string(),
+                    target_node: remainig_args.get("-target-node").unwrap_or(&"".to_string()).to_string(),
                     aggregation_keys: remainig_args.get("-keys").unwrap_or(&"".to_string()).to_string(),
                     aggregation_type: remainig_args.get("-aggregation").unwrap_or(&"".to_string()).to_string(),
                 };

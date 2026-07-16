@@ -122,99 +122,139 @@ impl QueryPlan {
 
         match cluster_command {
 
-            ClusterCommand::CmdGroupBy { target_name, aggregation_keys, aggregation_type } => {
+            ClusterCommand::CmdGroupBy { target_name, target_node, aggregation_keys, aggregation_type } => {
 
                 // TODO: Add loop for target-nodes; add target-nodes param to CLI mapping
 
                 let query_plan_idx = self.query_plan_steps.len() + 1;
-                let mut query_plan_steps = BTreeMap::new();
+                let mut query_plan_sub_steps = BTreeMap::new();
 
                 // Step 1: Aggregate
-                let query_plan_step_idx = query_plan_steps.len() + 1;
-                // Assuming here target_name is already in node datastore
-                if let Some(mut message_request_string) = Message::default_request_message("Aggregate") {
-                    message_request_string.set_body(MessageType::Aggregate {
-                        df_name: target_name.clone(),
-                        keys: aggregation_keys.clone(),
-                        agg_type: aggregation_type.clone(),
-                    });
-                    query_plan_steps.insert(query_plan_step_idx, (generate_query_plan_step_id(message_request_string.dest().unwrap()), QueryPlanTypes::Aggregate, message_request_string, QueryPlanStatus::Pending));
+                let mut query_plan_step_idx = 1;
+
+                if target_node.as_str() != "all" {
+
+                    let mut target_nodes_list: Vec<String> = target_node.split(",").map(|x| x.to_string()).collect::<Vec<String>>();
+
+                    if target_nodes_list == vec![""] {
+                        target_nodes_list.clear();
+                        target_nodes_list.push(target_node);
+                    }
+
+                    for target_node in target_nodes_list {
+
+                        // Assuming here target_name is already in node datastore
+                        if let Some(mut message_request_string) = Message::default_request_message("Aggregate") {
+                            message_request_string.set_dest(target_node);
+                            message_request_string.set_src("node-master".to_string());
+                            message_request_string.set_body(MessageType::Aggregate {
+                                df_name: target_name.clone(),
+                                keys: aggregation_keys.clone(),
+                                agg_type: aggregation_type.clone(),
+                            });
+                            query_plan_sub_steps.insert(query_plan_step_idx, (generate_query_plan_step_id(message_request_string.dest().unwrap()), QueryPlanTypes::Aggregate, message_request_string, QueryPlanStatus::Pending));
+                            query_plan_step_idx += 1;
+                        } else {
+                            return Err(ClusterExceptions::InvalidCommand { error_message: "aggregate".to_string() });
+                        }
+                    }
 
                 } else {
-                    return Err(ClusterExceptions::InvalidCommand { error_message: "aggregate".to_string() });
+
+                    let cluster_nodes = active_cluster_nodes.clone();
+
+                    for target_node in cluster_nodes {
+
+                        // Assuming here target_name is already in node datastore
+                        if let Some(mut message_request_string) = Message::default_request_message("Aggregate") {
+                            message_request_string.set_dest(target_node);
+                            message_request_string.set_src("node-master".to_string());
+                            message_request_string.set_body(MessageType::Aggregate {
+                                df_name: target_name.clone(),
+                                keys: aggregation_keys.clone(),
+                                agg_type: aggregation_type.clone(),
+                            });
+                            query_plan_sub_steps.insert(query_plan_step_idx, (generate_query_plan_step_id(message_request_string.dest().unwrap()), QueryPlanTypes::Aggregate, message_request_string, QueryPlanStatus::Pending));
+                            query_plan_step_idx += 1;
+                        } else {
+                            return Err(ClusterExceptions::InvalidCommand { error_message: "aggregate".to_string() });
+                        }
+                    }
                 }
-
-                // Step 2: Write to file
-                if let Some(mut message_request_string) = Message::default_request_message("WriteToFile") {
-                    // Need a method to lookup at the cluster level the datastore target to retrieve the schema
-                    // Otherwise a separate message must be sent to a node to retrieve the schema and that costs more than storing metadata in the cluster
-
-                    message_request_string.set_body(MessageType::WriteToFile {
-                        file_path: format!("{}/{}/intermediate_data_file.csv", file_system_manager.local_working_directory.clone(), target_name),
-                        file_format: aggregation_type.clone(),
-                        // Schema
-                    });
-                    let query_plan_step_idx = query_plan_steps.len() + 1;
-
-                    query_plan_steps.insert(query_plan_step_idx, (generate_query_plan_step_id(message_request_string.dest().unwrap()), QueryPlanTypes::WriteToFile, message_request_string, QueryPlanStatus::Pending));
-
-                } else {
-                    return Err(ClusterExceptions::InvalidCommand { error_message: "write_to_file".to_string() });
-                }
-
-                // Step 3: Read from file
-                if let Some(mut message_request_string) = Message::default_request_message("ReadFromFile") {
-                    // Assuming the file is stored in the local file system
-                    message_request_string.set_body(MessageType::ReadFromFile {
-                        file_path: format!("{}/{}/intermediate_data_file.csv", file_system_manager.local_working_directory.clone(), target_name),
-                        accessibility: "local".to_string(), // Assuming local for now
-                        bytes: "".to_string(), // Placeholder for byte ordinals
-                        schema: "".to_string(), // Placeholder for schema
-                    });
-
-                    let query_plan_step_idx = query_plan_steps.len() + 1;
-                    query_plan_steps.insert(query_plan_step_idx, (generate_query_plan_step_id(message_request_string.dest().unwrap()), QueryPlanTypes::ReadFromFile, message_request_string, QueryPlanStatus::Pending));
-
-                } else {
-                    return Err(ClusterExceptions::InvalidCommand { error_message: "read-from-file".to_string() });
-                }
-
-                // Step 4: Aggregate extend
-
-                // Union
-                if let Some(mut message_request_string) = Message::default_request_message("Union") {
-
-                    // TODO: Add Union Msg Type so AggregateExtend = 1. Union intermediate results, 2. Aggregate again
-                    message_request_string.set_body(MessageType::Union {
-                        df_name: target_name.clone(),
-                        keys: aggregation_keys.clone(),
-                    });
-
-                    let query_plan_step_idx = query_plan_steps.len() + 1;
-                    query_plan_steps.insert(query_plan_step_idx, (generate_query_plan_step_id(message_request_string.dest().unwrap()), QueryPlanTypes::AggregateExtend, message_request_string, QueryPlanStatus::Pending));
-
-                } else {
-                    return Err(ClusterExceptions::InvalidCommand { error_message: "aggregate-extend-union".to_string() });
-                }
-
-                // Aggregate
-                if let Some(mut message_request_string) = Message::default_request_message("AggregateExtend") {
-                    
-                    // TODO: Add Union Msg Type so AggregateExtend = 1. Union intermediate results, 2. Aggregate again
-                    message_request_string.set_body(MessageType::Aggregate {
-                        df_name: target_name.clone(),
-                        keys: aggregation_keys.clone(),
-                        agg_type: aggregation_type.clone(),
-                    });
-
-                    let query_plan_step_idx = query_plan_steps.len() + 1;
-                    query_plan_steps.insert(query_plan_step_idx, (generate_query_plan_step_id(message_request_string.dest().unwrap()), QueryPlanTypes::AggregateExtend, message_request_string, QueryPlanStatus::Pending));
-
-                } else {
-                    return Err(ClusterExceptions::InvalidCommand { error_message: "aggregate-extend".to_string() });
-                }
-                self.query_plan_steps.insert(query_plan_idx, query_plan_steps);
+                self.query_plan_steps.insert(query_plan_idx, query_plan_sub_steps);
                 return Ok(query_plan_idx);
+
+                // // Step 2: Write to file
+                // if let Some(mut message_request_string) = Message::default_request_message("WriteToFile") {
+                //     // Need a method to lookup at the cluster level the datastore target to retrieve the schema
+                //     // Otherwise a separate message must be sent to a node to retrieve the schema and that costs more than storing metadata in the cluster
+
+                //     message_request_string.set_body(MessageType::WriteToFile {
+                //         file_path: format!("{}/{}/intermediate_data_file.csv", file_system_manager.local_working_directory.clone(), target_name),
+                //         file_format: aggregation_type.clone(),
+                //         // Schema
+                //     });
+                //     let query_plan_step_idx = query_plan_steps.len() + 1;
+
+                //     query_plan_steps.insert(query_plan_step_idx, (generate_query_plan_step_id(message_request_string.dest().unwrap()), QueryPlanTypes::WriteToFile, message_request_string, QueryPlanStatus::Pending));
+
+                // } else {
+                //     return Err(ClusterExceptions::InvalidCommand { error_message: "write_to_file".to_string() });
+                // }
+
+                // // Step 3: Read from file
+                // if let Some(mut message_request_string) = Message::default_request_message("ReadFromFile") {
+                //     // Assuming the file is stored in the local file system
+                //     message_request_string.set_body(MessageType::ReadFromFile {
+                //         file_path: format!("{}/{}/intermediate_data_file.csv", file_system_manager.local_working_directory.clone(), target_name),
+                //         accessibility: "local".to_string(), // Assuming local for now
+                //         bytes: "".to_string(), // Placeholder for byte ordinals
+                //         schema: "".to_string(), // Placeholder for schema
+                //     });
+
+                //     let query_plan_step_idx = query_plan_steps.len() + 1;
+                //     query_plan_steps.insert(query_plan_step_idx, (generate_query_plan_step_id(message_request_string.dest().unwrap()), QueryPlanTypes::ReadFromFile, message_request_string, QueryPlanStatus::Pending));
+
+                // } else {
+                //     return Err(ClusterExceptions::InvalidCommand { error_message: "read-from-file".to_string() });
+                // }
+
+                // // Step 4: Aggregate extend
+
+                // // Union
+                // if let Some(mut message_request_string) = Message::default_request_message("Union") {
+
+                //     // TODO: Add Union Msg Type so AggregateExtend = 1. Union intermediate results, 2. Aggregate again
+                //     message_request_string.set_body(MessageType::Union {
+                //         df_name: target_name.clone(),
+                //         keys: aggregation_keys.clone(),
+                //     });
+
+                //     let query_plan_step_idx = query_plan_steps.len() + 1;
+                //     query_plan_steps.insert(query_plan_step_idx, (generate_query_plan_step_id(message_request_string.dest().unwrap()), QueryPlanTypes::AggregateExtend, message_request_string, QueryPlanStatus::Pending));
+
+                // } else {
+                //     return Err(ClusterExceptions::InvalidCommand { error_message: "aggregate-extend-union".to_string() });
+                // }
+
+                // // Aggregate
+                // if let Some(mut message_request_string) = Message::default_request_message("AggregateExtend") {
+                    
+                //     // TODO: Add Union Msg Type so AggregateExtend = 1. Union intermediate results, 2. Aggregate again
+                //     message_request_string.set_body(MessageType::Aggregate {
+                //         df_name: target_name.clone(),
+                //         keys: aggregation_keys.clone(),
+                //         agg_type: aggregation_type.clone(),
+                //     });
+
+                //     let query_plan_step_idx = query_plan_steps.len() + 1;
+                //     query_plan_steps.insert(query_plan_step_idx, (generate_query_plan_step_id(message_request_string.dest().unwrap()), QueryPlanTypes::AggregateExtend, message_request_string, QueryPlanStatus::Pending));
+
+                // } else {
+                //     return Err(ClusterExceptions::InvalidCommand { error_message: "aggregate-extend".to_string() });
+                // }
+                // self.query_plan_steps.insert(query_plan_idx, query_plan_steps);
+                // return Ok(query_plan_idx);
 
             },
             ClusterCommand::CmdDisplayDf { target_name, target_node, n_rows } => {

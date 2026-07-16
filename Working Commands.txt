@@ -112,4 +112,4 @@ read-file -fp test_data.txt -delimiter | -target-node all
 
 display-df -df_name df -target-node node-1 -n-rows 5
 
-group-by -df_name df -keys NAME -aggregation sum
+group-by -df_name df -target-node node-2 -keys NAME -aggregation sum
