@@ -50,50 +50,18 @@ impl Cluster {
     let wal_path = &cluster_config.working_directory.wal_path;
     let local_working_directory = &cluster_config.working_directory.local_path;
     let file_system_accessibility = &cluster_config.working_directory.file_system_type;
-    // let network_layout = &cluster_config.network;
+    let mut nodes = BTreeMap::new();
 
-    // let network_manager = NetworkManager::new(network_layout, outgoing_message_handler.clone(), cluster_config.working_directory.local_path.clone(), establish_network);
-
-    // let mut nodes = BTreeMap::new();
-    // let other_nodes = network_manager.network_map.clone().into_keys().collect::<Vec<String>>();
-    // let network_map = network_manager.network_map.clone();
-    // let mut node_request_senders = HashMap::new();
-
-    // // Create a channel for sending requests to nodes and receiving responses from nodes
-    // let (request_tx, request_rx) = mpsc::channel::<Message>(100);
-
-    // // Insert cluster-orchestrator node into the cluster
-    // let init_request = message::message_deserializer(&format!(r#"{{"type":"init","msg_id":0,"node_id":"node-master","node_ids":{:?}}}"#, other_nodes)).expect("Expecting correct init request structure");
-    // let virtual_remote_node = Node::create(&init_request, &cluster_config.working_directory.local_path.clone(), request_rx, node_event_sender.clone(),).await;
-    // let virtual_remote_node_handle = NodeHandle::new("node-master".to_string(), request_tx.clone());
-    // node_request_senders.insert("node-master".to_string(), request_tx);
-    // nodes.insert("node-master".to_string(), virtual_remote_node_handle);
-
-    // if establish_network {
-
-    //   for (node_id, (node_port, node_type)) in network_map {
-    //     match node_type {
-    //       NodeType::Local => {
-    //       },
-    //       NodeType::Remote => {
-    //         // Create a channel for sending requests to nodes and receiving responses from nodes
-    //         let (request_tx, request_rx) = mpsc::channel::<Message>(100);
-    //         let init_request = message::message_deserializer(&format!(r#"{{"type":"init","msg_id":0,"node_id":"{node_id}","node_ids":{:?}}}"#, other_nodes)).expect("Expecting correct init request structure");
-    //         let virtual_remote_node = Node::create(&init_request, &cluster_config.working_directory.local_path.clone(), request_rx, node_event_sender.clone(),).await;
-    //         let virtual_remote_node_handle = NodeHandle::new(node_id.clone(), request_tx.clone());
-    //         node_request_senders.insert(node_id.clone(), request_tx.clone());
-    //         nodes.insert(node_id.to_string(), virtual_remote_node_handle);
-    //       }
-    //     }
-    //   }
-      
-    // }
+    // Insert master node
+    let (request_tx, _request_rx) = mpsc::channel::<Message>(100);
+    let node_handle = NodeHandle::new("node-master".to_string(), request_tx);
+    nodes.insert("node-master".to_string(), node_handle);
 
     let mut cluster: Cluster = Cluster {
       cluster_id: format!("cluster-{cluster_reference}"), 
       execution_target,
       messenger,
-      nodes: BTreeMap::new(),
+      nodes,
       node_event_sender: node_event_sender,
       node_request_senders: HashMap::new(),
       transaction_manager: None,
@@ -200,24 +168,6 @@ impl Cluster {
     Ok(())
     }
 
-//   pub async fn run(&mut self) -> Result<(), ClusterExceptions> {
-    
-//     // Clone the Arc for the receiving channel
-//     let receiver_clone = Arc::clone(&self.receiving_channel);
-
-//     // Lock the receiver (this avoids the temporary value issue)
-//     let mut rx = receiver_clone.lock().await;
-    
-//     // TODO: Lazy vs Eager execution handling from cluster config
-//     while let Some(incoming_message) = rx.recv().await {
-//       self.categorize_and_queue(incoming_message).await?;
-//       // Process follow-ups with a slight delay if none exist
-//       self.process_followups().await?;
-//     }
-    
-//     Ok(())
-//   }
-
     pub fn remove(mut self, node: Node) -> Result<(), ClusterExceptions> {
 
     let node_removal = self.nodes.remove(&node.node_id);
@@ -260,87 +210,13 @@ impl Cluster {
 
     pub fn get_node_metadata(&self, node: String) -> Result<&NodeHandle, ClusterExceptions> {
 
-    if let Some(node) = self.nodes.get(&node) {
-        Ok(node)
+        if let Some(node) = self.nodes.get(&node) {
+            Ok(node)
+        }
+        else {
+            Err(ClusterExceptions::NodeDoesNotExist { error_message: node.clone() })
+        }
     }
-    else {
-        Err(ClusterExceptions::NodeDoesNotExist { error_message: node.clone() })
-    }
-
-    }
-
-    // pub fn map_request(&mut self, request: String) -> Result<String, ClusterExceptions> {
-
-    //     let args: Vec<String> = request.split(" ").map(|element| element.to_string()).collect();
-    //     // println!("{:?}", args);
-    //     let mut action = None;
-    //     let mut file_path = None;
-    //     let mut df_name = None;
-    //     let mut delimiter: Option<String> = None;
-    //     let mut target_node: Option<String> = None;
-    //     let mut all_nodes: bool = false;
-
-    //     let mut iter = args.iter().peekable();
-    //     while let Some(arg) = iter.next() {
-    //         match arg.as_str() {
-    //             "-a" => action = iter.next().map(|s| s.clone()),
-    //             "-fp" => file_path = iter.next().map(|s| s.clone()),
-    //             "-df_name" => df_name = iter.next().map(|s| s.clone()),
-    //             "-delimiter" => delimiter = iter.next().map(|s| s.clone()),
-    //             "-target-node" => target_node = iter.next().map(|s| s.clone()),
-    //             "-all-nodes" => all_nodes = true,
-    //             _ => {}
-    //         }
-    //     }
-
-    //     if let Some(parsed_action) = action.clone() {
-    //     match parsed_action.as_str() {
-    //         "read-file" => {
-    //         // TODO
-    //         // Need to accept df name when read request received
-    //         if let Some(fp) = file_path {
-    //             let request_string = self.read_data_from_file(fp.to_string(), delimiter)?;
-    //             return Ok(request_string);
-    //         } else {
-    //             return Err(ClusterExceptions::NodeDoesNotExist { error_message: request });
-    //         }
-    //         },
-    //         "display-df" => {
-    //         if let Some(df_name) = df_name {
-    //             let request_string = self.display_df(df_name.to_string(), target_node, all_nodes)?;
-    //             return Ok(request_string);
-    //         } else {
-    //             return Err(ClusterExceptions::NodeDoesNotExist { error_message: request });
-    //         }
-    //         },
-    //         "group-by" => {
-    //         if let Some(df_name) = df_name {
-    //             let request_string = self.display_df(df_name.to_string(), target_node, all_nodes)?;
-    //             return Ok(request_string);
-    //         } else {
-    //             return Err(ClusterExceptions::NodeDoesNotExist { error_message: request });
-    //         }
-    //         },
-    //         "log-cluster" => {
-    //         // TODO
-    //         // Need to accept log level when log request received
-    //         return Ok("log-cluster".to_string());
-    //         },
-    //         "log-node" => {
-    //         // TODO
-    //         // Need to accept log level when log request received
-    //         return Ok("log-node".to_string());
-    //         },
-    //         _ => {
-    //             return Ok(request);
-    //         }
-    //     }
-    //     } else {
-    //     return Ok(request);
-    //     }
-
-
-    // }
 
     pub fn log_messages(&self) -> std::io::Result<()> {
 
@@ -912,118 +788,6 @@ impl Cluster {
             }
         }
     }
-
-    // pub fn read_data_from_file(&mut self, file_path: String, delimiter: Option<String>) -> Result<String, ClusterExceptions> {
-
-    //     // Receive read request message
-    //     // File path retrieved from request
-    //     // Nodes are retrieved from cluster
-    //     // File path is added to file manager record
-    //     // Byte ordinals are generated for file based on nodes
-    //     // Transaction message is created that has a read request for each node with ordinal positions
-    //     // Depending on the FileSystemType, read is either receive bytes from home client and write to local file
-    //     // or, read existing file on distributed file share
-    //     // Read transaction completed or failed
-
-    //     // Get nodes
-    //     let nodes = self.get_nodes();
-    //     let separator: u8;
-
-    //     if let Some(delim) = delimiter {
-    //     separator = delim.as_bytes()[0];
-    //     } else {
-    //     separator = ",".to_string().as_bytes()[0];
-    //     }
-
-    //     // Inserts hash of file path into FileSystemManager
-    //     if let Ok(file_path_hash) = self.file_system_manager.read_from_file(file_path.clone(), &nodes) {
-        
-    //     // Open new transaction
-    //     if let Some(ref mut transaction) = Message::default_request_message("Transaction") {
-    //         transaction.set_src("cluster-orchestrator".to_string());
-
-    //         // TODO
-    //         // This will pull Node from first element in vector which is not guaranteed to be n1
-    //         // nodes can also be empty
-    //         transaction.set_dest(nodes[0].to_string());
-
-    //         let file_system_type = self.cluster_configuration.working_directory.file_system_type.clone();
-
-    //         let infered_file_schema = FileSystemManager::get_file_header(file_path.clone(), separator)?;
-    //         let infered_file_schema_string = serde_json::to_string(&infered_file_schema)?;
-    //         let byte_ordinals = FileSystemManager::get_byte_ordinals(file_path.clone(), &nodes)?;
-    //         let byte_ordinals_string = serde_json::to_string(&byte_ordinals)?;
-            
-    //         if let Some(_file_object) = self.file_system_manager.files.get(&file_path_hash) {
-    //         transaction.set_body(MessageType::Transaction { txn: vec![vec!["rf".to_string(), file_path.clone(), file_system_type.to_string(), byte_ordinals_string, infered_file_schema_string]] });
-    //         } else {
-    //         return Err(ClusterExceptions::UnkownClientRequest { error_message: file_path });
-    //         }
-
-    //         if let Ok(request_string) = message_serializer(&transaction) {
-    //         return Ok(request_string);
-    //         } else {
-    //         return Err(ClusterExceptions::UnkownClientRequest { error_message: file_path });
-    //         }
-
-    //     } else {
-    //         return Err(ClusterExceptions::UnkownClientRequest { error_message: file_path });
-    //     }
-    //     } else {
-    //     return Err(ClusterExceptions::UnkownClientRequest { error_message: file_path });
-    //     }
-
-    //     }
-
-    // pub fn display_df(&self, df_name: String, target_node: Option<String>, all_nodes: bool) -> Result<String, ClusterExceptions> {
-    //   let destination_node: String;
-    //   let all_available_nodes = self.get_nodes();
-    //   let n_rows = 5;
-    //   if let Some(node) = target_node {
-    //     destination_node = node;
-    //   } else {
-    //     destination_node = all_available_nodes[0].clone();
-    //   }
-
-    //   if !all_nodes {
-
-    //   let message_request = Message::Request { 
-    //     src: "cluster-orchestrator".to_string(), 
-    //     dest: destination_node, 
-    //     body: MessageType::DisplayDf { 
-    //       df_name, 
-    //       total_rows: n_rows,
-    //     } 
-    //   };
-    //   return Ok(message_serializer(&message_request)?);
-    //   }
-    //   else {
-
-    //     // Open new transaction
-    //     if let Some(ref mut transaction) = Message::default_request_message("Transaction") {
-    //       transaction.set_src("cluster-orchestrator".to_string());
-
-    //       // TODO
-    //       // This will pull Node from first element in vector which is not guaranteed to be n1
-    //       // nodes can also be empty
-    //       transaction.set_dest(destination_node);
-
-    //       transaction.set_body(MessageType::Transaction { txn: vec![vec!["display-df".to_string(), df_name, n_rows.to_string()]] });
-
-
-    //       if let Ok(request_string) = message_serializer(&transaction) {
-    //         return Ok(request_string);
-    //       } else {
-    //         return Err(ClusterExceptions::UnkownClientRequest { error_message: "display-df".to_string() });
-    //       }
-
-    //     } else {
-    //       return Err(ClusterExceptions::UnkownClientRequest { error_message: "display-df".to_string() });
-    //     }
-
-    //   }
-
-    // }
 
     pub async fn send_request_to_node(&mut self, message_id: usize, message_request: Message) -> Result<(), ClusterExceptions> {
         let destination = message_request

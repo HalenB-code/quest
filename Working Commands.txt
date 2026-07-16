@@ -1,0 +1,115 @@
+Working commands:
+
+
+
+
+-- Initiate cluster with manual node creation
+
+// -- exe --cluster_address --node_name --bind_address --local_path 
+
+C:\rust\projects\rust-bdc\target\debug\cluster.exe "C:\rust\projects\rust-bdc\config.toml" false
+
+-- Initiate cluster with network erection
+C:\rust\projects\rust-bdc\target\debug\cluster.exe "C:\rust\projects\rust-bdc\config.toml" true
+
+
+0={name="local",port="80881"},
+
+
+
+read-file -fp test_data.txt -delimiter | -target-node all
+
+display-df -df_name df -target-node node-1 -n-rows 5
+
+
+========================================================
+
+
+
+Next Steps:
+
+1_Error handling to map std:io:error and serde_json::error to custom error types
+2_First implementation of LAZY
+3_Basis statistics
+
+
+{"src":"cluster-orchestrator","dest":"node-1","body":{"type":"remote_connect"}}
+
+_Init
+{"type":"init","msg_id":1,"node_id":"node-1","node_ids":[]}
+{"type":"init","msg_id":1,"node_id":"node-2","node_ids":[]} 
+
+_ Generate
+{"src": "c1", "dest": "node-1", "body": {"type": "echo", "msg_id": 1, "echo": "19 Feb 2025"}}
+
+{"src": "c2", "dest": "node-2", "body": {"type": "echo", "msg_id": 1, "echo": "20 Feb 2025"}}
+
+_Unique ID 
+{"src": "c1", "dest": "node-1", "body": {"type": "generate", "msg_id": 1}}
+{"src": "c1", "dest": "node-2", "body": {"type": "generate", "msg_id": 1}}
+
+_Broadcast
+{"src": "c2", "dest": "node-1", "body": {"type": "broadcast", "message": 10}}
+{"src": "c2", "dest": "n2", "body": {"type": "broadcast", "message": 100}}
+
+_Broadcast Read
+{"src": "c2", "dest": "n1", "body": {"type": "broadcast_read"}}
+{"src": "c2", "dest": "n2", "body": {"type": "read", "message": 10}}
+
+_Topology
+{"src": "c2", "dest": "node-1", "body": {"type": "topology", "topology": {"node-1": ["node-2"]}}}
+{"src": "c2", "dest": "node-2", "body": {"type": "topology", "topology": {"node-2": ["node-1"]}}}
+
+_Vector Add and Read
+{"src": "c2", "dest": "n1", "body": {"type": "add", "delta": "1"}}
+{"src": "c2", "dest": "n1", "body": {"type": "read"}}
+{"src": "c2", "dest": "n2", "body": {"type": "read"}}
+
+
+_Send, Poll, List, and Committ Offsets
+{"src": "c2", "dest": "n1", "body": {"type": "send", "key": "k1", "msg": "100"}}
+{"src": "c2", "dest": "n1", "body": {"type": "poll", "offsets": {"k1": 1}}}
+{"src": "c2", "dest": "n1", "body": {"type": "commit_offsets", "offsets": {"k1": 1}}}
+{"src": "c2", "dest": "n1", "body": {"type": "list_committed_offsets", "keys": ["k1", "k2"]}}
+
+
+_File Reading & Display
+-a display-df -df_name df_broadcast -all-nodes true
+
+read-file -fp "C:\rust\projects\rust-bdc\test_data.txt" -delimiter |
+-a display-df -df_name df -all-nodes true
+
+-- Display Dfs
+-a display-df -df_name df_keyvalue -all-nodes true
+-a display-df -df_name df_broadcast -all-nodes true
+
+log -target cluster/nodes
+
+read-file -fp test_data.txt -delimiter | -target-node all
+
+cargo run --bin cluster_server "C:\rust\projects\rust-bdc\config.toml" true
+cargo run --bin node_client 127.0.0.1:80886 node-1 127.0.0.1:80888 C:\\rust\\projects\\rust-bdc
+
+// -- exe --cluster_address --node_name --bind_address --local_path 
+
+-- Initiate cluster with manual node creation
+
+C:\rust\projects\rust-bdc\target\debug\cluster.exe "C:\rust\projects\rust-bdc\config.toml" false
+
+
+-- Initiate cluster with network erection
+C:\rust\projects\rust-bdc\target\debug\cluster.exe "C:\rust\projects\rust-bdc\config.toml" true
+
+
+0={name="local",port="80881"},
+
+
+Working commands:
+
+
+
+read-file -fp test_data.txt -delimiter | -target-node all
+
+display-df -df_name df -target-node node-1 -n-rows 5
+
+group-by -df_name df -keys NAME -aggregation sum

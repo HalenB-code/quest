@@ -169,9 +169,8 @@ impl Session {
                     true => {
 
                       list_of_executables = self.get_executables(Some(target_step_id));
-                      println!("Executing request: {:?}", list_of_executables);
                       self.execute_executables(Some(target_step_id), list_of_executables).await.unwrap_or_else(|error| {
-                        println!("Error executing request: {:?}", error);
+                        eprintln!("Error executing request: {:?}", error);
                       });
 
                     }
@@ -182,7 +181,7 @@ impl Session {
                           // TODO: Remove unwrap and handle error if transaction_manager is None
                           list_of_executables = self.get_executables(None);
                           self.execute_executables(None, list_of_executables).await.unwrap_or_else(|error| {
-                            println!("Error executing request: {:?}", error);
+                            eprintln!("Error executing request: {:?}", error);
                             });
                         },
                         _ => {

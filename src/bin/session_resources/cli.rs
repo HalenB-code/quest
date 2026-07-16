@@ -131,7 +131,7 @@ impl ClusterCommand {
             "group-by" => Ok(ClusterCommand::CmdGroupBy {
                 target_name: "".to_string(),
                 aggregation_keys: "".to_string(),
-                aggregation_type: "sum".to_string(),
+                aggregation_type: "".to_string(),
             }),
             "log-cluster" => Ok(ClusterCommand::CmdLogCluster {
                 logging_target: "stdout".to_string(),
@@ -182,6 +182,7 @@ impl ClusterCommand {
 
         match action {
             ClusterCommand::CmdMessageString { .. } => {
+                println!("Message CLI {:?}", remainig_args);
                 let mapped_action = ClusterCommand::CmdMessageString {
                     message: remainig_args.get("-message").unwrap_or(&"".to_string()).to_string(),
                 };

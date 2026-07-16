@@ -2,6 +2,7 @@ use serde::{Serialize, Deserialize};
 use serde_json::Result;
 use std::fmt;
 use std::collections::HashMap;
+use crate::session_resources::datastore::DataFrame;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MsgKind { Control, Task }
@@ -29,6 +30,18 @@ pub enum Message {
         
         // #[serde(with = "as_json_string")]
         body: MessageType,
+    },
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub enum AggregateResult {
+    Inline {
+        data: DataFrame,
+    },
+    Materialized {
+        object_id: String,
+        byte_length: u64,
+        row_count: u64,
     },
 }
 
@@ -208,6 +221,7 @@ pub enum MessageType {
         agg_type: String,
     },
     AggregateOk {
+        result: AggregateResult
     },
     Union {
         df_name: String,
@@ -371,6 +385,8 @@ pub trait MessageTypeFields {
     fn set_txn(&mut self, new_txn: Vec<Vec<String>>);
     fn df_name(&self) -> Option<&String>;
     fn display_rows(&self) -> Option<usize>;
+    fn get_aggregate_keys(&self) -> Option<Vec<String>>;
+    fn get_aggregate_type(&self) -> Option<&String>;
 }
 
 // Implement `MessageFields` for `Message`
@@ -714,6 +730,28 @@ impl MessageTypeFields for MessageType {
     fn display_rows(&self) -> Option<usize> {
         if let MessageType::DisplayDf { total_rows, .. } = self {
             Some(*total_rows)
+        } else {
+            None
+        }
+    }
+
+    fn get_aggregate_keys(&self) -> Option<Vec<String>> {
+        // Delimited by comma
+        let  mut return_keys = vec![];
+        if let MessageType::Aggregate { keys, .. } = self {
+
+            for key in keys.split(",") {
+                return_keys.push(key.to_string())
+            }
+            Some(return_keys)
+        } else {
+            None
+        }
+    }
+
+    fn get_aggregate_type(&self) -> Option<&String> {
+        if let MessageType::Aggregate { agg_type, .. } = self {
+            Some(agg_type)
         } else {
             None
         }

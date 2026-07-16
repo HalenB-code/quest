@@ -124,6 +124,8 @@ impl QueryPlan {
 
             ClusterCommand::CmdGroupBy { target_name, aggregation_keys, aggregation_type } => {
 
+                // TODO: Add loop for target-nodes; add target-nodes param to CLI mapping
+
                 let query_plan_idx = self.query_plan_steps.len() + 1;
                 let mut query_plan_steps = BTreeMap::new();
 
@@ -145,7 +147,7 @@ impl QueryPlan {
                 // Step 2: Write to file
                 if let Some(mut message_request_string) = Message::default_request_message("WriteToFile") {
                     // Need a method to lookup at the cluster level the datastore target to retrieve the schema
-                    // Otherwise a separate messaged must be sent to a node to retrieve the schema and that costs more than storing metadata in the cluster
+                    // Otherwise a separate message must be sent to a node to retrieve the schema and that costs more than storing metadata in the cluster
 
                     message_request_string.set_body(MessageType::WriteToFile {
                         file_path: format!("{}/{}/intermediate_data_file.csv", file_system_manager.local_working_directory.clone(), target_name),

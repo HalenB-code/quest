@@ -23,7 +23,7 @@ impl fmt::Display for DataFrame {
 }
 
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct DataFrame {
     pub columns: HashMap<String, Column>,
 }
@@ -355,9 +355,9 @@ impl DataFrame {
         None
     }
 
-    pub fn sum(&self, column: String) -> Option<usize> {
+    pub fn sum(&self, column: &String) -> Option<usize> {
 
-        if let Some(column) = self.columns.get(&column) {
+        if let Some(column) = self.columns.get(column) {
             let column_type = column.column_type();
 
             match column_type {
@@ -393,9 +393,9 @@ impl DataFrame {
         None
     }
 
-    pub fn count(&self, column: String) -> Option<usize> {
+    pub fn count(&self, column: &String) -> Option<usize> {
 
-        if let Some(column) = self.columns.get(&column) {
+        if let Some(column) = self.columns.get(column) {
             let column_type = column.column_type();
 
             match column_type {
@@ -431,7 +431,55 @@ impl DataFrame {
         None
     }
 
+    pub fn aggregate(&self, agg_type: AggregationType, columns: Vec<String>) -> Result<DataFrame, DatastoreExceptions> {
+        
+        // For now we only support sum and count
+        match agg_type {
+            AggregationType::Sum => {
+                let mut aggregate_return: HashMap<String, Vec<usize>> = HashMap::new();
+
+                // TODO: Add support for more than one column
+                for column in columns {
+
+                    if let Some(return_sum) = self.sum(&column) {
+                        aggregate_return.insert(column.to_string(), vec![return_sum]);
+                        
+                    } else {
+                        return Err(DatastoreExceptions::FailedToDervieColumnSum { error_message: format!("Error deriving sum for column: {}", column) });
+                    }                          
+
+                }
+
+                Ok(DataFrame::new(Some(aggregate_return)))
+            },
+            AggregationType::Count => {
+                let mut aggregate_return: HashMap<String, Vec<usize>> = HashMap::new();
+                // TODO: Add support for more than one column
+                for column in columns {
+
+                    if let Some(return_sum) = self.count(&column) {
+                        aggregate_return.insert(column.to_string(), vec![return_sum]);
+                        
+                    } else {
+                        return Err(DatastoreExceptions::FailedToDervieColumnSum { error_message: format!("Error deriving sum for column: {}", column) });
+                    }                          
+
+                }
+                Ok(DataFrame::new(Some(aggregate_return)))
+
+            }
+        }
+
+    }
+
+
     
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum AggregationType {
+    Count,
+    Sum
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -447,7 +495,7 @@ pub enum ColumnType {
 }
 
 // Define an enum to represent dynamically typed column data
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Column {
     IntVec(Vec<i32>),
     FloatVec(Vec<f64>),
@@ -744,6 +792,10 @@ pub enum DatastoreExceptions {
     DfDoesNotExist { error_message: String },
     FailedToRetrieveData { error_message: String },
     DataTypeInferenceFailed { error_message: String },
+    FailedToDervieColumnSum { error_message: String },
+    FailedToDervieColumnCount { error_message: String },
+    DfColumnDoesNotExist { error_message: String },
+    DfActionNotCurrentlySupported { error_message: String },
 }
 
 
@@ -760,6 +812,10 @@ impl fmt::Display for DatastoreExceptions {
             DatastoreExceptions::DfDoesNotExist { error_message} => write!(f, "Requested df '{}' does not exist.", error_message),
             DatastoreExceptions::FailedToRetrieveData { error_message} => write!(f, "Failed to retrieve data for action '{}'.", error_message),
             DatastoreExceptions::DataTypeInferenceFailed { error_message} => write!(f, "Data type inference failed for '{}'.", error_message),
+            DatastoreExceptions::FailedToDervieColumnSum { error_message} => write!(f, "Aggregation 'sum' for column could not be derived '{}'.", error_message),
+            DatastoreExceptions::FailedToDervieColumnCount { error_message} => write!(f, "Aggregation 'count' for column could not be derived '{}'.", error_message),
+            DatastoreExceptions::DfColumnDoesNotExist { error_message} => write!(f, "Df column could not be found '{}'.", error_message),
+            DatastoreExceptions::DfActionNotCurrentlySupported { error_message} => write!(f, "Your requested action on df is not currently supported '{}'.", error_message),
         }
     }
 }

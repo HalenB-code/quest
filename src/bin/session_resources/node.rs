@@ -2,10 +2,9 @@ use crate::session_resources::file_system;
 use crate::session_resources::message::{self, Message, MessageType};
 use crate::session_resources::message::MessageTypeFields;
 use crate::session_resources::implementation::{MessageExecutionType, StdOut};
-use crate::session_resources::message::{MessageFields, MessageExceptions};
+use crate::session_resources::message::{MessageFields, MessageExceptions, AggregateResult};
 use crate::session_resources::exceptions::ClusterExceptions;
-use crate::session_resources::cluster::Cluster;
-use crate::session_resources::datastore::{Column, DataFrame, DatastoreExceptions};
+use crate::session_resources::datastore::{Column, DataFrame, DatastoreExceptions, AggregationType};
 
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -26,6 +25,9 @@ use chrono::Timelike;
 // Node Class
 // Node is the execution unit of a cluster
 //
+
+const INLINE_RESULT_LIMIT_BYTES: usize = 1 * 1024 * 1024;
+
 #[derive(Debug, Clone)]
 pub struct NodeHandle {
     pub node_id: String,
@@ -332,7 +334,7 @@ pub enum NodeRoleType {
                 let df = self.get_dataframe_mut(&"df_vector".to_string());
 
                 if let Some(df) = df {
-                    if let Some(global_counter) = df.sum("Counter".to_string()) {
+                    if let Some(global_counter) = df.sum(&"Counter".to_string()) {
 
                         message_response = Message::Response {
                             src: message.dest().unwrap().to_string(),
@@ -562,6 +564,55 @@ pub enum NodeRoleType {
                 }
 
             },
+            MessageType::Aggregate { .. } => {
+
+                let df_name = message.body().unwrap().df_name().unwrap();
+                let keys = message.body().unwrap().get_aggregate_keys().unwrap();
+                let requested_aggregation = message.body().unwrap().get_aggregate_type().unwrap().as_str();
+                let aggregation_type: AggregationType;
+
+                match requested_aggregation {
+                    "count" => {
+                        aggregation_type = AggregationType::Count;
+                    },
+                    "sum" => {
+                        aggregation_type = AggregationType::Sum;
+                    },
+                    _ => {
+                        return Err(ClusterExceptions::DatastoreError(DatastoreExceptions::DfActionNotCurrentlySupported { error_message: requested_aggregation.to_string() } ))
+                    }
+                }
+
+                if let Some(df) = self.get_dataframe(df_name) {
+                    
+                    if let Ok(aggregate_result) = df.aggregate(aggregation_type, keys) {
+                        let df_name = format!("df_{requested_aggregation}");
+                        self.insert_dataframe(df_name.clone(), aggregate_result);
+
+                        if let Some(response_df) = self.get_dataframe(df_name.as_str()) {
+
+                            // TODO: Add support for materialized and inline response
+                            message_response = Message::Response {
+                                src: message.dest().unwrap().to_string(),
+                                dest: message.src().unwrap().to_string(),
+                                body: MessageType::AggregateOk { 
+                                    result: AggregateResult::Inline { 
+                                        data: response_df.clone()
+                                    } 
+                                }
+                            };
+
+                        } else {
+                        return Err(ClusterExceptions::DatastoreError(DatastoreExceptions::DfDoesNotExist { error_message: df_name.clone() } ));
+                        }
+                    } else {
+                        return Err(ClusterExceptions::DatastoreError(DatastoreExceptions::DfDoesNotExist { error_message: df_name.clone() } ));
+                    }
+
+                } else {
+                    return Err(ClusterExceptions::DatastoreError(DatastoreExceptions::DfDoesNotExist { error_message: df_name.clone() } ));
+                }
+            }
             _ => { 
                 return Err(ClusterExceptions::UnkownClientRequest {
                     error_message: "Response type not yet created".to_string(),
