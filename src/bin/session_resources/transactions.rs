@@ -309,6 +309,7 @@ impl QueryPlan {
 
                 let file_system_type = file_system_manager.local_working_directory.clone();
                 let infered_file_schema = FileSystemManager::get_file_header(full_file_path.clone(), separator)?;
+                println!("Schema order in txn build {:?}", infered_file_schema);
                 let infered_file_schema_string = serde_json::to_string(&infered_file_schema)?;
 
                 // Step 1: Read from file

@@ -505,7 +505,7 @@ pub enum NodeRoleType {
                 // TODO
                 // Hardcoding the client request df name as "df" for now
                 match self.get_dataframe(&"df".to_string()) {
-                    Some(df) => {
+                    Some(_df) => {
                             return Err(ClusterExceptions::DatastoreError(DatastoreExceptions::DfAlreadyExists { error_message: file_path.clone() }));
                     },
                     None => {
@@ -586,10 +586,10 @@ pub enum NodeRoleType {
                 if let Some(df) = self.get_dataframe(df_name) {
                     
                     if let Ok(aggregate_result) = df.aggregate(aggregation_type, keys) {
-                        let df_name = format!("df_{requested_aggregation}");
-                        self.insert_dataframe(df_name.clone(), aggregate_result);
+                        let df_name_agg = format!("df_{requested_aggregation}");
+                        self.insert_dataframe(df_name_agg.clone(), aggregate_result);
 
-                        if let Some(response_df) = self.get_dataframe(df_name.as_str()) {
+                        if let Some(response_df) = self.get_dataframe(df_name_agg.as_str()) {
 
                             // TODO: Add support for materialized and inline response
                             message_response = Message::Response {
@@ -601,12 +601,11 @@ pub enum NodeRoleType {
                                     } 
                                 }
                             };
-
                         } else {
                         return Err(ClusterExceptions::DatastoreError(DatastoreExceptions::DfDoesNotExist { error_message: df_name.clone() } ));
                         }
                     } else {
-                        return Err(ClusterExceptions::DatastoreError(DatastoreExceptions::DfDoesNotExist { error_message: df_name.clone() } ));
+                        return Err(ClusterExceptions::DatastoreError(DatastoreExceptions::DfDoesNotExist { error_message: format!("Mising {}", df_name.clone()) } ));
                     }
 
                 } else {

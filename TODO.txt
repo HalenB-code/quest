@@ -6,20 +6,4 @@ Next Steps:
 
 
 
-Group by Steps
-
-1. Aggregate request to node
-2. Node aggregate and return aggregate to cluster; if too many bytes (how many?), write to file; otherwise encode and return as MessageField
-3. If write to file, AggregateIntermediateRequest; if MessageField; AggregateOk
-4. Cluster: if AggregateIntermediateRequest, additional steps to read each node file, aggregate at cluster level, return result
-            if AggregateOk, read MessageField from each node response, aggregate at cluster level, return result
-
-
-
-Cluster -> Node | Aggregate
-
-Node -> GroupBy, Store Result, Check bytes of result: If > max_allowed_tcp_bytes, AggregateIntermediateRequest ( Write to file, then response request)
-                                                        If < max_allowed_tcp_bytes, AggregateOk
-
-Cluster -> AggregateIntermediateRequest ( Read from file, union, aggregate, store ?, return )
-            AggregateOk ( Read from message, union, aggregate, store ?, return )
+group by requires separate functions to allow for keys and aggregation on supplied keys
